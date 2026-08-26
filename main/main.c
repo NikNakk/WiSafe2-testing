@@ -103,14 +103,13 @@ static esp_err_t init_spi_slave(void)
 }
 
 /*
- * Wait for the radio to clock exactly one byte.
- * tx_byte is what the ESP exposes on MISO while the radio clocks the transfer.
- * The byte simultaneously received on MOSI is returned in rx_byte.
+ * Wait for the radio to clock exactly one unsolicited byte.
+ * A zero byte is exposed on MISO while the radio clocks MOSI.
  */
-static esp_err_t transact_byte(uint8_t tx_byte, uint8_t *rx_byte, TickType_t timeout)
+static esp_err_t receive_byte(uint8_t *value, TickType_t timeout)
 {
-    uint8_t tx = tx_byte;
-    uint8_t rx = 0;
+    uint8_t tx = 0x00;
+    uint8_t rx = 0x00;
 
     spi_slave_transaction_t trans = {
         .length = 8,
@@ -127,28 +126,53 @@ static esp_err_t transact_byte(uint8_t tx_byte, uint8_t *rx_byte, TickType_t tim
         ESP_LOGW(TAG, "Unexpected SPI transaction length: %u bits", (unsigned) trans.trans_len);
     }
 
-    if (rx_byte != NULL) {
-        *rx_byte = rx;
+    if (value != NULL) {
+        *value = rx;
     }
     return ESP_OK;
 }
 
 /*
- * Send one byte using the same handshake as FireAngelNano.ino:
- *   1. prepare the slave transaction
+ * Send one byte using the WiSafe2/Nano handshake.
+ *
+ * The AVR code raises IRQ, waits for CS to fall, then loads SPDR. On ESP-IDF
+ * it is safer to arm the SPI-slave transaction first, then raise IRQ. This
+ * guarantees that MISO is ready before the radio is invited to assert CS and
+ * clock the byte.
+ *
+ * Sequence:
+ *   1. queue one 8-bit SPI-slave transaction
  *   2. assert IRQ
  *   3. radio asserts CS and clocks the byte
- *   4. deassert IRQ
- *
- * spi_slave_transmit() must already be waiting when IRQ is asserted, so the
- * transaction is run in this task and IRQ surrounds the blocking call.
+ *   4. wait for transaction completion
+ *   5. deassert IRQ
  */
 static esp_err_t send_byte(uint8_t value)
 {
-    uint8_t rx = 0;
+    uint8_t tx = value;
+    uint8_t rx = 0x00;
 
+    spi_slave_transaction_t trans = {
+        .length = 8,
+        .tx_buffer = &tx,
+        .rx_buffer = &rx,
+    };
+
+    TickType_t timeout = pdMS_TO_TICKS(BYTE_TIMEOUT_MS);
+
+    esp_err_t err = spi_slave_queue_trans(SPI_HOST_USED, &trans, timeout);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to arm TX 0x%02X: %s", value, esp_err_to_name(err));
+        return err;
+    }
+
+    /* Only tell the radio to clock a byte after the SPI transaction is armed. */
     irq_set(true);
-    esp_err_t err = transact_byte(value, &rx, pdMS_TO_TICKS(BYTE_TIMEOUT_MS));
+
+    spi_slave_transaction_t *completed = NULL;
+    err = spi_slave_get_trans_result(SPI_HOST_USED, &completed, timeout);
+
+    /* Always return IRQ to idle, including timeout/error paths. */
     irq_set(false);
 
     if (err == ESP_ERR_TIMEOUT) {
@@ -156,6 +180,15 @@ static esp_err_t send_byte(uint8_t value)
         return err;
     }
     ESP_RETURN_ON_ERROR(err, TAG, "SPI TX failed");
+
+    if (completed != &trans) {
+        ESP_LOGE(TAG, "Unexpected SPI transaction completed");
+        return ESP_FAIL;
+    }
+
+    if (trans.trans_len != 8) {
+        ESP_LOGW(TAG, "Unexpected TX transaction length: %u bits", (unsigned) trans.trans_len);
+    }
 
     ESP_LOGI(TAG, "TX 0x%02X  simultaneous RX 0x%02X", value, rx);
     return ESP_OK;
@@ -168,15 +201,6 @@ static esp_err_t send_packet(const uint8_t *data, size_t length)
         ESP_RETURN_ON_ERROR(send_byte(data[i]), TAG, "Packet TX failed at byte %u", (unsigned) i);
     }
     return ESP_OK;
-}
-
-/*
- * Listen for an unsolicited byte from the radio. A zero TX byte is harmless;
- * the Nano similarly only cares about SPDR's received value while receiving.
- */
-static esp_err_t receive_byte(uint8_t *value, TickType_t timeout)
-{
-    return transact_byte(0x00, value, timeout);
 }
 
 static size_t receive_packet(uint8_t *buffer, size_t capacity, uint32_t overall_timeout_ms)
