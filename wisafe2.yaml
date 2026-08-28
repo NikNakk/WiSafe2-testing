@@ -3,7 +3,7 @@ esphome:
   friendly_name: WiSafe2 Bridge
   project:
     name: nickkennedy.wisafe2_bridge
-    version: "0.1.0"
+    version: "0.2.0"
 
 esp32:
   board: m5stack-atoms3
@@ -18,9 +18,21 @@ external_components:
 logger:
 
 api:
+  encryption:
+    key: !secret api_password
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  discovery: false
+  discover_ip: false
+  log_topic:
 
 ota:
+
   - platform: esphome
+    password: !secret ota_password
 
 wifi:
   ssid: !secret wifi_ssid
@@ -38,8 +50,21 @@ wisafe2:
   miso_pin: 7
   cs_pin: 8
   irq_pin: 38
+  max_detectors: 16
+  bridge_device_id: "A5B813"
   initialized:
     name: "Radio Initialized"
   last_packet:
     name: "Last Packet"
-
+  last_device:
+    name: "Last Device"
+  last_model:
+    name: "Last Model"
+  last_event:
+    name: "Last Event"
+  last_result:
+    name: "Last Result"
+  last_base:
+    name: "Last Base State"
+  last_battery:
+    name: "Last Battery State"

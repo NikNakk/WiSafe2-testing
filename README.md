@@ -76,19 +76,44 @@ The repository also contains a local ESPHome external component in
 ESPHome `spi:` block because the WiSafe2 radio, rather than the AtomS3, is the
 SPI master.
 
-Copy `secrets.yaml.example` to `secrets.yaml`, enter the Wi-Fi credentials, and
-then compile or flash with:
+Copy `secrets.yaml.example` to `secrets.yaml`, enter the Wi-Fi and MQTT broker
+credentials, and then compile or flash with:
 
 ```bash
 esphome compile wisafe2.yaml
 esphome run wisafe2.yaml
 ```
 
-The first ESPHome milestone intentionally initializes the radio and receives
-complete raw packets only. It publishes `Radio Initialized` and `Last Packet`
-diagnostic entities while a dedicated FreeRTOS task owns the timing-sensitive
-SPI operations. Pairing controls and decoded alarm entities will be added after
-this transport behaves identically to the standalone test harness.
+The ESPHome component publishes `Radio Initialized`, `Last Packet` and decoded
+last-device diagnostics through the native API. A dedicated FreeRTOS task owns
+the timing-sensitive SPI operations.
+
+Each newly heard detector ID is stored in flash and advertised with retained
+Home Assistant MQTT discovery messages. Home Assistant creates one device per
+detector, containing alarm, low-battery, base-problem, model, last-event, test
+result and raw-frame entities. Unused detector capacity is not advertised. The
+default inventory limit is 16 and can be changed with `max_detectors` up to 32.
+Discovery and state are republished after an MQTT reconnect.
+
+The YAML deliberately sets ESPHome's ordinary MQTT entity discovery to false:
+the bridge diagnostics arrive through the native API, while only the dynamic
+detector devices use MQTT discovery. `log_topic` is also disabled to keep radio
+diagnostic logs off MQTT.
+
+## Tests
+
+The radio packet decoder is platform-independent and has host-side coverage for
+the observed status frames, tests, emergencies, silence, missing detectors,
+battery/base flags and malformed input. Run it without an ESP32 toolchain:
+
+```bash
+./tests/run_tests.sh
+```
+
+GitHub Actions runs the protocol tests, validates the ESPHome configuration and
+compiles the complete firmware for every push and pull request. CI copies the
+tracked placeholder values from `secrets.yaml.example`; real credentials remain
+in the ignored `secrets.yaml` file and are never required by the workflow.
 
 ## Expected log
 
@@ -105,8 +130,8 @@ If the first TX byte times out, check power, common ground, IRQ/CS wiring and th
 
 ## Current limitations
 
-The standalone test harness intentionally does not implement Wi-Fi, packet
-decoding, heartbeat, alarm entities, test commands or silence commands. Its
-pairing flow remains an automatic boot-time bench test. The ESPHome prototype
-currently provides Wi-Fi/API/OTA and raw packet diagnostics, but not pairing or
-decoded alarm entities yet.
+The standalone test harness intentionally does not implement Wi-Fi, heartbeat,
+alarm entities, test commands or silence commands. Its pairing flow remains an
+automatic boot-time bench test. The ESPHome prototype now provides
+Wi-Fi/API/OTA, packet decoding and persistent MQTT-discovered detector devices;
+pairing and outbound alarm commands are still to be ported.

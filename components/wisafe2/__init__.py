@@ -1,9 +1,11 @@
+import re
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import binary_sensor, text_sensor
 from esphome.const import CONF_ID, ENTITY_CATEGORY_DIAGNOSTIC
 
-DEPENDENCIES = ["esp32"]
+DEPENDENCIES = ["esp32", "mqtt"]
 AUTO_LOAD = ["binary_sensor", "text_sensor"]
 
 CONF_SCLK_PIN = "sclk_pin"
@@ -13,11 +15,27 @@ CONF_CS_PIN = "cs_pin"
 CONF_IRQ_PIN = "irq_pin"
 CONF_INITIALIZED = "initialized"
 CONF_LAST_PACKET = "last_packet"
+CONF_LAST_DEVICE = "last_device"
+CONF_LAST_MODEL = "last_model"
+CONF_LAST_EVENT = "last_event"
+CONF_LAST_RESULT = "last_result"
+CONF_LAST_BASE = "last_base"
+CONF_LAST_BATTERY = "last_battery"
+CONF_DISCOVERY_PREFIX = "discovery_prefix"
+CONF_MAX_DETECTORS = "max_detectors"
+CONF_BRIDGE_DEVICE_ID = "bridge_device_id"
 
 wisafe2_ns = cg.esphome_ns.namespace("wisafe2")
 WiSafe2Component = wisafe2_ns.class_("WiSafe2Component", cg.Component)
 
 _GPIO = cv.int_range(min=0, max=48)
+
+
+def _device_id(value):
+    value = cv.string_strict(value).strip().upper()
+    if re.fullmatch(r"[0-9A-F]{6}", value) is None:
+        raise cv.Invalid("bridge_device_id must be exactly six hexadecimal digits")
+    return value
 
 
 def _validate_pins(config):
@@ -37,6 +55,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_MISO_PIN): _GPIO,
             cv.Required(CONF_CS_PIN): _GPIO,
             cv.Required(CONF_IRQ_PIN): _GPIO,
+            cv.Optional(CONF_DISCOVERY_PREFIX, default="homeassistant"): cv.string_strict,
+            cv.Optional(CONF_MAX_DETECTORS, default=16): cv.int_range(min=1, max=32),
+            cv.Optional(CONF_BRIDGE_DEVICE_ID, default="A5B813"): _device_id,
             cv.Optional(CONF_INITIALIZED): binary_sensor.binary_sensor_schema(
                 device_class="connectivity",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -44,6 +65,30 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_LAST_PACKET): text_sensor.text_sensor_schema(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
                 icon="mdi:code-tags",
+            ),
+            cv.Optional(CONF_LAST_DEVICE): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:identifier",
+            ),
+            cv.Optional(CONF_LAST_MODEL): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:smoke-detector-variant",
+            ),
+            cv.Optional(CONF_LAST_EVENT): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:message-alert-outline",
+            ),
+            cv.Optional(CONF_LAST_RESULT): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:check-decagram-outline",
+            ),
+            cv.Optional(CONF_LAST_BASE): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:home-outline",
+            ),
+            cv.Optional(CONF_LAST_BATTERY): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:battery-outline",
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -64,6 +109,9 @@ async def to_code(config):
         config[CONF_CS_PIN],
         config[CONF_IRQ_PIN],
     ))
+    cg.add(var.set_discovery_prefix(config[CONF_DISCOVERY_PREFIX]))
+    cg.add(var.set_max_detectors(config[CONF_MAX_DETECTORS]))
+    cg.add(var.set_bridge_device_id(int(config[CONF_BRIDGE_DEVICE_ID], 16)))
 
     if initialized_config := config.get(CONF_INITIALIZED):
         initialized = await binary_sensor.new_binary_sensor(initialized_config)
@@ -72,3 +120,15 @@ async def to_code(config):
     if last_packet_config := config.get(CONF_LAST_PACKET):
         last_packet = await text_sensor.new_text_sensor(last_packet_config)
         cg.add(var.set_last_packet_sensor(last_packet))
+
+    for key, setter in (
+        (CONF_LAST_DEVICE, "set_last_device_sensor"),
+        (CONF_LAST_MODEL, "set_last_model_sensor"),
+        (CONF_LAST_EVENT, "set_last_event_sensor"),
+        (CONF_LAST_RESULT, "set_last_result_sensor"),
+        (CONF_LAST_BASE, "set_last_base_sensor"),
+        (CONF_LAST_BATTERY, "set_last_battery_sensor"),
+    ):
+        if sensor_config := config.get(key):
+            sensor = await text_sensor.new_text_sensor(sensor_config)
+            cg.add(getattr(var, setter)(sensor))

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-tests:
+    name: Protocol tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run host protocol tests
+        run: ./tests/run_tests.sh
+
+  esphome-build:
+    name: ESPHome configuration and firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/requirements-ci.txt
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ hashFiles('wisafe2.yaml', 'components/**/*') }}
+          restore-keys: |
+            platformio-${{ runner.os }}-
+
+      - name: Install ESPHome
+        run: python -m pip install --requirement .github/requirements-ci.txt
+
+      - name: Create CI secrets
+        run: cp secrets.yaml.example secrets.yaml
+
+      - name: Validate ESPHome configuration
+        run: esphome config wisafe2.yaml
+
+      - name: Compile ESPHome firmware
+        run: esphome compile wisafe2.yaml

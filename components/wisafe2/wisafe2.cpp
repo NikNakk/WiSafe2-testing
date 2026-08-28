@@ -8,6 +8,9 @@
 #include "esp_log.h"
 #include "esp_private/spi_slave_internal.h"
 #include "esp_rom_sys.h"
+#include "esphome/components/json/json_util.h"
+#include "esphome/core/application.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 namespace esphome::wisafe2 {
@@ -30,6 +33,7 @@ void WiSafe2Component::set_pins(int sclk, int mosi, int miso, int cs, int irq) {
 
 void WiSafe2Component::setup() {
   ESP_LOGCONFIG(TAG, "Setting up WiSafe2 radio...");
+  this->load_inventory_();
   if (this->initialized_sensor_ != nullptr)
     this->initialized_sensor_->publish_initial_state(false);
 
@@ -74,8 +78,28 @@ void WiSafe2Component::loop() {
       }
       if (this->last_packet_sensor_ != nullptr)
         this->last_packet_sensor_->publish_state(line);
+
+      DecodedPacket decoded{};
+      if (decode_packet(event.packet, event.length, &decoded)) {
+        ESP_LOGI(TAG, "Decoded device=%s model=%s event=%s result=%s base=%s battery=%s", decoded.device,
+                 decoded.model, decoded.event, decoded.result, decoded.base, decoded.battery);
+        if (this->last_device_sensor_ != nullptr)
+          this->last_device_sensor_->publish_state(decoded.device);
+        if (this->last_model_sensor_ != nullptr)
+          this->last_model_sensor_->publish_state(decoded.model);
+        if (this->last_event_sensor_ != nullptr)
+          this->last_event_sensor_->publish_state(decoded.event);
+        if (this->last_result_sensor_ != nullptr)
+          this->last_result_sensor_->publish_state(decoded.result);
+        if (this->last_base_sensor_ != nullptr)
+          this->last_base_sensor_->publish_state(decoded.base);
+        if (this->last_battery_sensor_ != nullptr)
+          this->last_battery_sensor_->publish_state(decoded.battery);
+        this->update_detector_(decoded, line);
+      }
     }
   }
+  this->service_mqtt_();
 }
 
 void WiSafe2Component::dump_config() {
@@ -86,6 +110,8 @@ void WiSafe2Component::dump_config() {
   ESP_LOGCONFIG(TAG, "  MISO: GPIO%d", this->miso_pin_);
   ESP_LOGCONFIG(TAG, "  CS: GPIO%d", this->cs_pin_);
   ESP_LOGCONFIG(TAG, "  IRQ: GPIO%d", this->irq_pin_);
+  ESP_LOGCONFIG(TAG, "  MQTT discovery prefix: %s", this->discovery_prefix_.c_str());
+  ESP_LOGCONFIG(TAG, "  Discovered detectors: %u/%u", this->detector_count_, this->max_detectors_);
 }
 
 void WiSafe2Component::radio_task_entry(void *parameter) {
@@ -337,10 +363,17 @@ void WiSafe2Component::raw_receive_loop_() {
 
   uint8_t packet[PACKET_MAX]{};
   size_t used = 0;
+  bool discarding_overflow = false;
   while (true) {
-    esp_err_t err = this->wait_for_slot_(&slots[current], pdMS_TO_TICKS(BYTE_TIMEOUT_MS));
-    if (err == ESP_ERR_TIMEOUT)
+    uint32_t timeout_ms = used > 0 ? INCOMPLETE_FRAME_TIMEOUT_MS : BYTE_TIMEOUT_MS;
+    esp_err_t err = this->wait_for_slot_(&slots[current], pdMS_TO_TICKS(timeout_ms));
+    if (err == ESP_ERR_TIMEOUT) {
+      if (used > 0) {
+        ESP_LOGW(TAG, "Discarding incomplete %u-byte radio frame", static_cast<unsigned>(used));
+        used = 0;
+      }
       continue;
+    }
     if (err != ESP_OK) {
       this->reset_spi_slave_();
       return;
@@ -358,10 +391,20 @@ void WiSafe2Component::raw_receive_loop_() {
 
     if (bits != 8)
       ESP_LOGW(TAG, "RX transaction used %u clocks (expected 8)", static_cast<unsigned>(bits));
-    if (used < sizeof(packet))
-      packet[used++] = value;
-    else
+    if (discarding_overflow) {
+      if (value == 0x7E)
+        discarding_overflow = false;
+      continue;
+    }
+
+    if (used >= sizeof(packet)) {
+      ESP_LOGW(TAG, "Radio frame exceeded %u bytes; discarding through terminator",
+               static_cast<unsigned>(sizeof(packet)));
       used = 0;
+      discarding_overflow = value != 0x7E;
+      continue;
+    }
+    packet[used++] = value;
 
     if (value == 0x7E) {
       this->log_packet_("PACKET: ", packet, used);
@@ -402,6 +445,266 @@ void WiSafe2Component::emit_event_(EventType type, const uint8_t *packet, size_t
     memcpy(event.packet, packet, event.length);
   if (xQueueSend(this->event_queue_, &event, 0) != pdTRUE)
     ESP_LOGW(TAG, "Radio event queue full; dropping event");
+}
+
+void WiSafe2Component::load_inventory_() {
+  this->inventory_pref_ = global_preferences->make_preference<StoredInventory>(0x8C33B6A1, true);
+  StoredInventory stored{};
+  if (!this->inventory_pref_.load(&stored) || stored.magic != INVENTORY_MAGIC || stored.count > MAX_DETECTORS) {
+    ESP_LOGI(TAG, "No valid stored detector inventory");
+    return;
+  }
+  this->detector_count_ = stored.count > this->max_detectors_ ? this->max_detectors_ : stored.count;
+  for (uint8_t i = 0; i < this->detector_count_; ++i) {
+    this->detectors_[i].device_id = stored.detectors[i].device_id;
+    this->detectors_[i].model_id = stored.detectors[i].model_id;
+    this->detectors_[i].has_model = stored.detectors[i].has_model != 0;
+    this->detectors_[i].alarm = -1;
+    this->detectors_[i].base_problem = -1;
+    this->detectors_[i].battery_low = -1;
+  }
+  ESP_LOGI(TAG, "Restored %u detector(s) from flash", this->detector_count_);
+}
+
+void WiSafe2Component::save_inventory_() {
+  StoredInventory stored{};
+  stored.magic = INVENTORY_MAGIC;
+  stored.count = this->detector_count_;
+  for (uint8_t i = 0; i < this->detector_count_; ++i) {
+    stored.detectors[i].device_id = this->detectors_[i].device_id;
+    stored.detectors[i].model_id = this->detectors_[i].model_id;
+    stored.detectors[i].has_model = this->detectors_[i].has_model;
+  }
+  if (!this->inventory_pref_.save(&stored))
+    ESP_LOGW(TAG, "Failed to persist detector inventory");
+}
+
+WiSafe2Component::DetectorState *WiSafe2Component::find_or_create_detector_(const DecodedPacket &decoded) {
+  if (decoded.device_id == 0 || decoded.device_id == this->bridge_device_id_)
+    return nullptr;
+  for (uint8_t i = 0; i < this->detector_count_; ++i) {
+    if (this->detectors_[i].device_id == decoded.device_id)
+      return &this->detectors_[i];
+  }
+  if (this->detector_count_ >= this->max_detectors_) {
+    ESP_LOGW(TAG, "Detector %06X ignored: configured limit of %u reached",
+             static_cast<unsigned>(decoded.device_id), this->max_detectors_);
+    return nullptr;
+  }
+  DetectorState *detector = &this->detectors_[this->detector_count_++];
+  memset(detector, 0, sizeof(*detector));
+  detector->device_id = decoded.device_id;
+  detector->alarm = -1;
+  detector->base_problem = -1;
+  detector->battery_low = -1;
+  ESP_LOGI(TAG, "Discovered new detector %06X (%u/%u)", static_cast<unsigned>(decoded.device_id),
+           this->detector_count_, this->max_detectors_);
+  this->save_inventory_();
+  return detector;
+}
+
+void WiSafe2Component::update_detector_(const DecodedPacket &decoded, const char *raw_frame) {
+  DetectorState *detector = this->find_or_create_detector_(decoded);
+  if (detector == nullptr)
+    return;
+  bool first_update = detector->raw_frame[0] == '\0';
+  bool inventory_changed = false;
+  if (decoded.has_model && (!detector->has_model || detector->model_id != decoded.model_id)) {
+    detector->model_id = decoded.model_id;
+    detector->has_model = true;
+    inventory_changed = true;
+  }
+  detector->alarm = decoded.alarm ? 1 : 0;
+  if (decoded.has_base)
+    detector->base_problem = decoded.base_problem ? 1 : 0;
+  if (decoded.has_battery)
+    detector->battery_low = decoded.battery_low ? 1 : 0;
+  if (decoded.has_event)
+    snprintf(detector->event, sizeof(detector->event), "%s", decoded.event);
+  if (decoded.has_result)
+    snprintf(detector->result, sizeof(detector->result), "%s", decoded.result);
+  else
+    detector->result[0] = '\0';
+  snprintf(detector->raw_frame, sizeof(detector->raw_frame), "%s", raw_frame);
+  if (inventory_changed)
+    this->save_inventory_();
+  if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected()) {
+    bool published = true;
+    if (first_update || inventory_changed)
+      published = this->publish_detector_discovery_(*detector);
+    published &= this->publish_detector_state_(*detector);
+    if (!published) {
+      this->mqtt_resync_pending_ = true;
+      this->mqtt_resync_index_ = 0;
+      this->mqtt_next_sync_ms_ = millis() + 5000;
+    }
+  }
+}
+
+void WiSafe2Component::service_mqtt_() {
+  if (mqtt::global_mqtt_client == nullptr)
+    return;
+  bool connected = mqtt::global_mqtt_client->is_connected();
+  if (connected && !this->mqtt_was_connected_) {
+    ESP_LOGI(TAG, "MQTT connected; scheduling detector discovery refresh");
+    this->mqtt_resync_pending_ = true;
+    this->mqtt_resync_index_ = 0;
+    this->mqtt_next_sync_ms_ = millis();
+  }
+  this->mqtt_was_connected_ = connected;
+  if (!connected || !this->mqtt_resync_pending_)
+    return;
+  uint32_t now = millis();
+  if (static_cast<int32_t>(now - this->mqtt_next_sync_ms_) < 0)
+    return;
+  if (this->mqtt_resync_index_ >= this->detector_count_) {
+    this->mqtt_resync_pending_ = false;
+    return;
+  }
+  const DetectorState &detector = this->detectors_[this->mqtt_resync_index_];
+  bool published = this->publish_detector_discovery_(detector);
+  // State topics are retained by the broker. Do not replace a retained state
+  // with unknown values immediately after reboot; publish once this boot has
+  // actually heard the detector.
+  if (detector.raw_frame[0] != '\0')
+    published &= this->publish_detector_state_(detector);
+  if (published) {
+    ++this->mqtt_resync_index_;
+    this->mqtt_next_sync_ms_ = now + 250;
+  } else {
+    this->mqtt_next_sync_ms_ = now + 5000;
+  }
+}
+
+void WiSafe2Component::format_detector_topic_(char *buffer, size_t length, const DetectorState &detector,
+                                              const char *suffix) const {
+  snprintf(buffer, length, "%s/wisafe2/%06x/%s", mqtt::global_mqtt_client->get_topic_prefix().c_str(),
+           static_cast<unsigned>(detector.device_id), suffix);
+}
+
+const char *WiSafe2Component::model_name_(const DetectorState &detector) const {
+  if (!detector.has_model)
+    return "Unknown FireAngel alarm";
+  switch (detector.model_id) {
+    case 0xED08: return "FP2620W2";
+    case 0x1104: return "FP1720W2";
+    case 0x1103: return "WST-630";
+    case 0x7803: return "W2-CO-10X";
+    case 0xC304: return "W2-SVP-630";
+    default: return "Unknown FireAngel alarm";
+  }
+}
+
+const char *WiSafe2Component::alarm_device_class_(const DetectorState &detector) const {
+  if ((detector.has_model && detector.model_id == 0x7803) || strstr(detector.event, "CARBON MONOXIDE") != nullptr)
+    return "carbon_monoxide";
+  if (detector.has_model && detector.model_id == 0x1104)
+    return "heat";
+  return "smoke";
+}
+
+bool WiSafe2Component::publish_discovery_entity_(const DetectorState &detector, const char *component,
+                                                 const char *key, const char *name, const char *value_template,
+                                                 const char *device_class, const char *entity_category,
+                                                 const char *icon) {
+  char discovery_topic[192];
+  char state_topic[128];
+  char unique_id[96];
+  char object_id[96];
+  char device_identifier[80];
+  char detector_name[40];
+  snprintf(unique_id, sizeof(unique_id), "wisafe2_%s_%06x_%s", App.get_name().c_str(),
+           static_cast<unsigned>(detector.device_id), key);
+  snprintf(object_id, sizeof(object_id), "%s_%06x_%s", App.get_name().c_str(),
+           static_cast<unsigned>(detector.device_id), key);
+  snprintf(device_identifier, sizeof(device_identifier), "wisafe2_%s_%06x", App.get_name().c_str(),
+           static_cast<unsigned>(detector.device_id));
+  snprintf(detector_name, sizeof(detector_name), "FireAngel %06X", static_cast<unsigned>(detector.device_id));
+  snprintf(discovery_topic, sizeof(discovery_topic), "%s/%s/%s/config", this->discovery_prefix_.c_str(), component,
+           unique_id);
+  this->format_detector_topic_(state_topic, sizeof(state_topic), detector, "state");
+  const mqtt::Availability &availability = mqtt::global_mqtt_client->get_availability();
+
+  return mqtt::global_mqtt_client->publish_json(
+      discovery_topic,
+      [&](JsonObject root) {
+        root["name"] = name;
+        root["unique_id"] = unique_id;
+        root["object_id"] = object_id;
+        root["state_topic"] = state_topic;
+        root["value_template"] = value_template;
+        if (device_class != nullptr)
+          root["device_class"] = device_class;
+        if (entity_category != nullptr)
+          root["entity_category"] = entity_category;
+        if (icon != nullptr)
+          root["icon"] = icon;
+        if (strcmp(component, "binary_sensor") == 0) {
+          root["payload_on"] = "ON";
+          root["payload_off"] = "OFF";
+        }
+        if (!availability.topic.empty()) {
+          root["availability_topic"] = availability.topic;
+          root["payload_available"] = availability.payload_available;
+          root["payload_not_available"] = availability.payload_not_available;
+        }
+        JsonObject device = root["device"].to<JsonObject>();
+        JsonArray identifiers = device["identifiers"].to<JsonArray>();
+        identifiers.add(device_identifier);
+        device["name"] = detector_name;
+        device["manufacturer"] = "FireAngel";
+        device["model"] = this->model_name_(detector);
+        JsonObject origin = root["origin"].to<JsonObject>();
+        origin["name"] = "WiSafe2 ESPHome bridge";
+        origin["sw_version"] = ESPHOME_VERSION;
+      },
+      0, true);
+}
+
+bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector) {
+  bool ok = true;
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "alarm", "Alarm", "{{ value_json.alarm }}",
+                                        this->alarm_device_class_(detector), nullptr, nullptr);
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "battery_low", "Battery low",
+                                        "{{ value_json.battery_low }}", "battery", "diagnostic", nullptr);
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "base_problem", "Base problem",
+                                        "{{ value_json.base_problem }}", "problem", "diagnostic", nullptr);
+  ok &= this->publish_discovery_entity_(detector, "sensor", "model", "Model", "{{ value_json.model }}", nullptr,
+                                        "diagnostic", "mdi:smoke-detector-variant");
+  ok &= this->publish_discovery_entity_(detector, "sensor", "last_event", "Last event",
+                                        "{{ value_json.event }}", nullptr, nullptr, "mdi:message-alert-outline");
+  ok &= this->publish_discovery_entity_(detector, "sensor", "test_result", "Test result",
+                                        "{{ value_json.test_result }}", nullptr, "diagnostic",
+                                        "mdi:check-decagram-outline");
+  ok &= this->publish_discovery_entity_(detector, "sensor", "raw_frame", "Last raw frame",
+                                        "{{ value_json.raw_frame }}", nullptr, "diagnostic", "mdi:code-tags");
+  return ok;
+}
+
+bool WiSafe2Component::publish_detector_state_(const DetectorState &detector) {
+  char topic[128];
+  char model[16];
+  this->format_detector_topic_(topic, sizeof(topic), detector, "state");
+  if (detector.has_model)
+    snprintf(model, sizeof(model), "%04X", detector.model_id);
+  else
+    snprintf(model, sizeof(model), "UNKNOWN");
+  return mqtt::global_mqtt_client->publish_json(
+      topic,
+      [&](JsonObject root) {
+        if (detector.alarm >= 0) root["alarm"] = detector.alarm ? "ON" : "OFF";
+        else root["alarm"] = nullptr;
+        if (detector.battery_low >= 0) root["battery_low"] = detector.battery_low ? "ON" : "OFF";
+        else root["battery_low"] = nullptr;
+        if (detector.base_problem >= 0) root["base_problem"] = detector.base_problem ? "ON" : "OFF";
+        else root["base_problem"] = nullptr;
+        root["model"] = model;
+        root["model_name"] = this->model_name_(detector);
+        root["event"] = detector.event[0] != '\0' ? detector.event : nullptr;
+        root["test_result"] = detector.result[0] != '\0' ? detector.result : nullptr;
+        root["raw_frame"] = detector.raw_frame[0] != '\0' ? detector.raw_frame : nullptr;
+      },
+      0, true);
 }
 
 }  // namespace esphome::wisafe2

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "driver/gpio.h"
 #include "driver/gpio_filter.h"
@@ -11,8 +12,12 @@
 #include "freertos/task.h"
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/mqtt/mqtt_client.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
+
+#include "protocol.h"
 
 namespace esphome::wisafe2 {
 
@@ -21,6 +26,15 @@ class WiSafe2Component : public Component {
   void set_pins(int sclk, int mosi, int miso, int cs, int irq);
   void set_initialized_sensor(binary_sensor::BinarySensor *sensor) { this->initialized_sensor_ = sensor; }
   void set_last_packet_sensor(text_sensor::TextSensor *sensor) { this->last_packet_sensor_ = sensor; }
+  void set_last_device_sensor(text_sensor::TextSensor *sensor) { this->last_device_sensor_ = sensor; }
+  void set_last_model_sensor(text_sensor::TextSensor *sensor) { this->last_model_sensor_ = sensor; }
+  void set_last_event_sensor(text_sensor::TextSensor *sensor) { this->last_event_sensor_ = sensor; }
+  void set_last_result_sensor(text_sensor::TextSensor *sensor) { this->last_result_sensor_ = sensor; }
+  void set_last_base_sensor(text_sensor::TextSensor *sensor) { this->last_base_sensor_ = sensor; }
+  void set_last_battery_sensor(text_sensor::TextSensor *sensor) { this->last_battery_sensor_ = sensor; }
+  void set_discovery_prefix(const std::string &prefix) { this->discovery_prefix_ = prefix; }
+  void set_max_detectors(uint8_t max_detectors) { this->max_detectors_ = max_detectors; }
+  void set_bridge_device_id(uint32_t device_id) { this->bridge_device_id_ = device_id; }
 
   void setup() override;
   void loop() override;
@@ -34,6 +48,9 @@ class WiSafe2Component : public Component {
   static constexpr uint32_t RX_ACK_PULSE_US = 8;
   static constexpr unsigned INIT_MAX_ATTEMPTS = 50;
   static constexpr uint32_t INIT_RETRY_DELAY_MS = 500;
+  static constexpr uint32_t INCOMPLETE_FRAME_TIMEOUT_MS = 100;
+  static constexpr size_t MAX_DETECTORS = 32;
+  static constexpr uint32_t INVENTORY_MAGIC = 0x57533231;
 
   struct SpiSlot {
     uint32_t tx_word;
@@ -59,6 +76,32 @@ class WiSafe2Component : public Component {
     uint8_t packet[PACKET_MAX];
   };
 
+  struct StoredDetector {
+    uint32_t device_id;
+    uint16_t model_id;
+    uint8_t has_model;
+    uint8_t reserved;
+  };
+
+  struct StoredInventory {
+    uint32_t magic;
+    uint8_t count;
+    uint8_t reserved[3];
+    StoredDetector detectors[MAX_DETECTORS];
+  };
+
+  struct DetectorState {
+    uint32_t device_id;
+    uint16_t model_id;
+    bool has_model;
+    int8_t alarm;
+    int8_t base_problem;
+    int8_t battery_low;
+    char event[32];
+    char result[12];
+    char raw_frame[PACKET_MAX * 3];
+  };
+
   static void radio_task_entry(void *parameter);
   void radio_task_();
   bool initialize_radio_();
@@ -80,6 +123,19 @@ class WiSafe2Component : public Component {
   void log_exchange_diagnostics_(const ExchangeResult *result) const;
   void log_packet_(const char *prefix, const uint8_t *data, size_t length) const;
   void emit_event_(EventType type, const uint8_t *packet = nullptr, size_t length = 0);
+  void load_inventory_();
+  void save_inventory_();
+  DetectorState *find_or_create_detector_(const DecodedPacket &decoded);
+  void update_detector_(const DecodedPacket &decoded, const char *raw_frame);
+  void service_mqtt_();
+  bool publish_detector_discovery_(const DetectorState &detector);
+  bool publish_detector_state_(const DetectorState &detector);
+  bool publish_discovery_entity_(const DetectorState &detector, const char *component, const char *key,
+                                 const char *name, const char *value_template, const char *device_class,
+                                 const char *entity_category, const char *icon);
+  const char *model_name_(const DetectorState &detector) const;
+  const char *alarm_device_class_(const DetectorState &detector) const;
+  void format_detector_topic_(char *buffer, size_t length, const DetectorState &detector, const char *suffix) const;
 
   gpio_num_t sclk_pin_{GPIO_NUM_NC};
   gpio_num_t mosi_pin_{GPIO_NUM_NC};
@@ -91,7 +147,22 @@ class WiSafe2Component : public Component {
   TaskHandle_t radio_task_handle_{nullptr};
   binary_sensor::BinarySensor *initialized_sensor_{nullptr};
   text_sensor::TextSensor *last_packet_sensor_{nullptr};
+  text_sensor::TextSensor *last_device_sensor_{nullptr};
+  text_sensor::TextSensor *last_model_sensor_{nullptr};
+  text_sensor::TextSensor *last_event_sensor_{nullptr};
+  text_sensor::TextSensor *last_result_sensor_{nullptr};
+  text_sensor::TextSensor *last_base_sensor_{nullptr};
+  text_sensor::TextSensor *last_battery_sensor_{nullptr};
+  std::string discovery_prefix_{"homeassistant"};
+  uint8_t max_detectors_{16};
+  uint32_t bridge_device_id_{0xA5B813};
+  DetectorState detectors_[MAX_DETECTORS]{};
+  uint8_t detector_count_{0};
+  ESPPreferenceObject inventory_pref_{};
+  bool mqtt_was_connected_{false};
+  bool mqtt_resync_pending_{false};
+  uint8_t mqtt_resync_index_{0};
+  uint32_t mqtt_next_sync_ms_{0};
 };
 
 }  // namespace esphome::wisafe2
-
