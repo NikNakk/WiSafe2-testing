@@ -43,6 +43,11 @@ wifi:
 
 captive_portal:
 
+sensor:
+  - platform: uptime
+    name: "Bridge Uptime"
+    entity_category: diagnostic
+
 wisafe2:
   id: wisafe_radio
   sclk_pin: 5
@@ -52,6 +57,7 @@ wisafe2:
   irq_pin: 38
   max_detectors: 16
   bridge_device_id: "A5B813"
+  bridge_model_id: "1103"
   initialized:
     name: "Radio Initialized"
   last_packet:
@@ -68,3 +74,23 @@ wisafe2:
     name: "Last Base State"
   last_battery:
     name: "Last Battery State"
+  paired:
+    name: "Network Paired"
+  command_busy:
+    name: "Radio Command Running"
+  last_command:
+    name: "Last Radio Command"
+  sound_co:
+    name: "Sound CO Test"
+  sound_fire:
+    name: "Sound Fire Test"
+  sound_combined:
+    name: "Sound Combined Test"
+  silence_co:
+    name: "Silence CO Alarms"
+  silence_fire:
+    name: "Silence Fire Alarms"
+  check_pairing:
+    name: "Check Network Pairing"
+  start_pairing:
+    name: "Start Network Pairing"

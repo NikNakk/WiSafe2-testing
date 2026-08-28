@@ -5,6 +5,74 @@
 
 namespace esphome::wisafe2 {
 
+const char *management_command_name(ManagementCommand command) {
+  switch (command) {
+    case ManagementCommand::SOUND_CO: return "Sound CO test";
+    case ManagementCommand::SOUND_FIRE: return "Sound fire test";
+    case ManagementCommand::SOUND_COMBINED: return "Sound combined test";
+    case ManagementCommand::SILENCE_CO: return "Silence CO alarms";
+    case ManagementCommand::SILENCE_FIRE: return "Silence fire alarms";
+    case ManagementCommand::QUERY_PAIRING: return "Check pairing";
+    case ManagementCommand::START_PAIRING: return "Start pairing";
+  }
+  return "Unknown command";
+}
+
+bool encode_management_command(ManagementCommand command, uint32_t bridge_device_id, uint16_t bridge_model_id,
+                               CommandFrames *frames) {
+  if (frames == nullptr || bridge_device_id > 0xFFFFFF)
+    return false;
+
+  memset(frames, 0, sizeof(*frames));
+  const uint8_t id0 = (bridge_device_id >> 16) & 0xFF;
+  const uint8_t id1 = (bridge_device_id >> 8) & 0xFF;
+  const uint8_t id2 = bridge_device_id & 0xFF;
+  const uint8_t model0 = (bridge_model_id >> 8) & 0xFF;
+  const uint8_t model1 = bridge_model_id & 0xFF;
+
+  uint8_t event_code = 0;
+  if (command == ManagementCommand::SOUND_CO || command == ManagementCommand::SOUND_FIRE ||
+      command == ManagementCommand::SOUND_COMBINED) {
+    event_code = command == ManagementCommand::SOUND_CO        ? 0x41
+                 : command == ManagementCommand::SOUND_FIRE    ? 0x81
+                                                               : 0xFF;
+    const uint8_t primary[] = {0x70, id0, id1, id2, event_code, 0x01, model0, model1, 0x7E};
+    const uint8_t secondary[] = {0x91, id0, id1, id2, model0, model1, event_code, 0x05, 0x00, 0x02, 0x7E};
+    memcpy(frames->primary, primary, sizeof(primary));
+    memcpy(frames->secondary, secondary, sizeof(secondary));
+    frames->primary_length = sizeof(primary);
+    frames->secondary_length = sizeof(secondary);
+    return true;
+  }
+
+  if (command == ManagementCommand::SILENCE_CO || command == ManagementCommand::SILENCE_FIRE) {
+    event_code = command == ManagementCommand::SILENCE_CO ? 0x40 : 0x80;
+    const uint8_t primary[] = {0x61, id0, id1, id2, event_code, 0x01, 0x7E};
+    memcpy(frames->primary, primary, sizeof(primary));
+    frames->primary_length = sizeof(primary);
+    return true;
+  }
+
+  if (command == ManagementCommand::QUERY_PAIRING) {
+    const uint8_t primary[] = {0xD3, 0x03, 0x7E};
+    memcpy(frames->primary, primary, sizeof(primary));
+    frames->primary_length = sizeof(primary);
+    return true;
+  }
+
+  if (command == ManagementCommand::START_PAIRING) {
+    const uint8_t primary[] = {0xD3, 0x12, 0x01, 0x7E};
+    const uint8_t secondary[] = {0x91, id0, id1, id2, model0, model1, 0xFF, 0x05, 0x01, 0x01, 0x7E};
+    memcpy(frames->primary, primary, sizeof(primary));
+    memcpy(frames->secondary, secondary, sizeof(secondary));
+    frames->primary_length = sizeof(primary);
+    frames->secondary_length = sizeof(secondary);
+    return true;
+  }
+
+  return false;
+}
+
 bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded) {
   if (packet == nullptr || decoded == nullptr || length < 2 || packet[length - 1] != 0x7E)
     return false;

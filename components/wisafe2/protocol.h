@@ -5,6 +5,23 @@
 
 namespace esphome::wisafe2 {
 
+enum class ManagementCommand : uint8_t {
+  SOUND_CO,
+  SOUND_FIRE,
+  SOUND_COMBINED,
+  SILENCE_CO,
+  SILENCE_FIRE,
+  QUERY_PAIRING,
+  START_PAIRING,
+};
+
+struct CommandFrames {
+  uint8_t primary[11];
+  size_t primary_length;
+  uint8_t secondary[11];
+  size_t secondary_length;
+};
+
 struct DecodedPacket {
   bool recognized;
   uint32_t device_id;
@@ -26,5 +43,8 @@ struct DecodedPacket {
 };
 
 bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded);
+bool encode_management_command(ManagementCommand command, uint32_t bridge_device_id, uint16_t bridge_model_id,
+                               CommandFrames *frames);
+const char *management_command_name(ManagementCommand command);
 
 }  // namespace esphome::wisafe2

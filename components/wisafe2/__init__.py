@@ -2,11 +2,15 @@ import re
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import binary_sensor, text_sensor
-from esphome.const import CONF_ID, ENTITY_CATEGORY_DIAGNOSTIC
+from esphome.components import binary_sensor, button, text_sensor
+from esphome.const import (
+    CONF_ID,
+    ENTITY_CATEGORY_CONFIG,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+)
 
 DEPENDENCIES = ["esp32", "mqtt"]
-AUTO_LOAD = ["binary_sensor", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "button", "text_sensor"]
 
 CONF_SCLK_PIN = "sclk_pin"
 CONF_MOSI_PIN = "mosi_pin"
@@ -21,12 +25,25 @@ CONF_LAST_EVENT = "last_event"
 CONF_LAST_RESULT = "last_result"
 CONF_LAST_BASE = "last_base"
 CONF_LAST_BATTERY = "last_battery"
+CONF_PAIRED = "paired"
+CONF_COMMAND_BUSY = "command_busy"
+CONF_LAST_COMMAND = "last_command"
+CONF_SOUND_CO = "sound_co"
+CONF_SOUND_FIRE = "sound_fire"
+CONF_SOUND_COMBINED = "sound_combined"
+CONF_SILENCE_CO = "silence_co"
+CONF_SILENCE_FIRE = "silence_fire"
+CONF_CHECK_PAIRING = "check_pairing"
+CONF_START_PAIRING = "start_pairing"
 CONF_DISCOVERY_PREFIX = "discovery_prefix"
 CONF_MAX_DETECTORS = "max_detectors"
 CONF_BRIDGE_DEVICE_ID = "bridge_device_id"
+CONF_BRIDGE_MODEL_ID = "bridge_model_id"
 
 wisafe2_ns = cg.esphome_ns.namespace("wisafe2")
 WiSafe2Component = wisafe2_ns.class_("WiSafe2Component", cg.Component)
+WiSafe2CommandButton = wisafe2_ns.class_("WiSafe2CommandButton", button.Button)
+ManagementCommand = wisafe2_ns.enum("ManagementCommand", is_class=True)
 
 _GPIO = cv.int_range(min=0, max=48)
 
@@ -35,6 +52,13 @@ def _device_id(value):
     value = cv.string_strict(value).strip().upper()
     if re.fullmatch(r"[0-9A-F]{6}", value) is None:
         raise cv.Invalid("bridge_device_id must be exactly six hexadecimal digits")
+    return value
+
+
+def _model_id(value):
+    value = cv.string_strict(value).strip().upper()
+    if re.fullmatch(r"[0-9A-F]{4}", value) is None:
+        raise cv.Invalid("bridge_model_id must be exactly four hexadecimal digits")
     return value
 
 
@@ -58,6 +82,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DISCOVERY_PREFIX, default="homeassistant"): cv.string_strict,
             cv.Optional(CONF_MAX_DETECTORS, default=16): cv.int_range(min=1, max=32),
             cv.Optional(CONF_BRIDGE_DEVICE_ID, default="A5B813"): _device_id,
+            cv.Optional(CONF_BRIDGE_MODEL_ID, default="1103"): _model_id,
             cv.Optional(CONF_INITIALIZED): binary_sensor.binary_sensor_schema(
                 device_class="connectivity",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -90,6 +115,48 @@ CONFIG_SCHEMA = cv.All(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
                 icon="mdi:battery-outline",
             ),
+            cv.Optional(CONF_PAIRED): binary_sensor.binary_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:access-point-check",
+            ),
+            cv.Optional(CONF_COMMAND_BUSY): binary_sensor.binary_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:progress-clock",
+            ),
+            cv.Optional(CONF_LAST_COMMAND): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:console-line",
+            ),
+            cv.Optional(CONF_SOUND_CO): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:molecule-co",
+            ),
+            cv.Optional(CONF_SOUND_FIRE): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:fire",
+            ),
+            cv.Optional(CONF_SOUND_COMBINED): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:alarm-light",
+            ),
+            cv.Optional(CONF_SILENCE_CO): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:volume-off",
+            ),
+            cv.Optional(CONF_SILENCE_FIRE): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:volume-off",
+            ),
+            cv.Optional(CONF_CHECK_PAIRING): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:access-point-check",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_START_PAIRING): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:access-point-plus",
+                entity_category=ENTITY_CATEGORY_CONFIG,
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on_esp32,
@@ -112,6 +179,7 @@ async def to_code(config):
     cg.add(var.set_discovery_prefix(config[CONF_DISCOVERY_PREFIX]))
     cg.add(var.set_max_detectors(config[CONF_MAX_DETECTORS]))
     cg.add(var.set_bridge_device_id(int(config[CONF_BRIDGE_DEVICE_ID], 16)))
+    cg.add(var.set_bridge_model_id(int(config[CONF_BRIDGE_MODEL_ID], 16)))
 
     if initialized_config := config.get(CONF_INITIALIZED):
         initialized = await binary_sensor.new_binary_sensor(initialized_config)
@@ -132,3 +200,29 @@ async def to_code(config):
         if sensor_config := config.get(key):
             sensor = await text_sensor.new_text_sensor(sensor_config)
             cg.add(getattr(var, setter)(sensor))
+
+    for key, setter in (
+        (CONF_PAIRED, "set_paired_sensor"),
+        (CONF_COMMAND_BUSY, "set_command_busy_sensor"),
+    ):
+        if sensor_config := config.get(key):
+            sensor = await binary_sensor.new_binary_sensor(sensor_config)
+            cg.add(getattr(var, setter)(sensor))
+
+    if last_command_config := config.get(CONF_LAST_COMMAND):
+        sensor = await text_sensor.new_text_sensor(last_command_config)
+        cg.add(var.set_last_command_sensor(sensor))
+
+    for key, command in (
+        (CONF_SOUND_CO, ManagementCommand.SOUND_CO),
+        (CONF_SOUND_FIRE, ManagementCommand.SOUND_FIRE),
+        (CONF_SOUND_COMBINED, ManagementCommand.SOUND_COMBINED),
+        (CONF_SILENCE_CO, ManagementCommand.SILENCE_CO),
+        (CONF_SILENCE_FIRE, ManagementCommand.SILENCE_FIRE),
+        (CONF_CHECK_PAIRING, ManagementCommand.QUERY_PAIRING),
+        (CONF_START_PAIRING, ManagementCommand.START_PAIRING),
+    ):
+        if button_config := config.get(key):
+            command_button = await button.new_button(button_config)
+            cg.add(command_button.set_parent(var))
+            cg.add(command_button.set_command(command))

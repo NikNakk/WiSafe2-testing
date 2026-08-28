@@ -1,3 +1,6 @@
 .esphome/
 /build/
+__pycache__/
 secrets.yaml
+eim_config.toml
+sdkconfig

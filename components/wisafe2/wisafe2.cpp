@@ -36,10 +36,19 @@ void WiSafe2Component::setup() {
   this->load_inventory_();
   if (this->initialized_sensor_ != nullptr)
     this->initialized_sensor_->publish_initial_state(false);
+  if (this->command_busy_sensor_ != nullptr)
+    this->command_busy_sensor_->publish_initial_state(false);
 
   this->event_queue_ = xQueueCreate(8, sizeof(RadioEvent));
-  if (this->event_queue_ == nullptr) {
-    ESP_LOGE(TAG, "Could not allocate radio event queue");
+  this->command_queue_ = xQueueCreate(1, sizeof(ManagementCommand));
+  if (this->event_queue_ == nullptr || this->command_queue_ == nullptr) {
+    ESP_LOGE(TAG, "Could not allocate radio queues");
+    if (this->event_queue_ != nullptr)
+      vQueueDelete(this->event_queue_);
+    if (this->command_queue_ != nullptr)
+      vQueueDelete(this->command_queue_);
+    this->event_queue_ = nullptr;
+    this->command_queue_ = nullptr;
     this->mark_failed();
     return;
   }
@@ -50,9 +59,37 @@ void WiSafe2Component::setup() {
                               &this->radio_task_handle_, RADIO_TASK_CORE) != pdPASS) {
     ESP_LOGE(TAG, "Could not create radio task");
     vQueueDelete(this->event_queue_);
+    vQueueDelete(this->command_queue_);
     this->event_queue_ = nullptr;
+    this->command_queue_ = nullptr;
     this->mark_failed();
   }
+}
+
+void WiSafe2Component::request_command(ManagementCommand command) {
+  const char *name = management_command_name(command);
+  if (!this->radio_ready_ || this->command_queue_ == nullptr) {
+    ESP_LOGW(TAG, "%s rejected: radio is not ready", name);
+    if (this->last_command_sensor_ != nullptr)
+      this->last_command_sensor_->publish_state(std::string(name) + ": RADIO NOT READY");
+    return;
+  }
+  if (this->command_busy_ || xQueueSend(this->command_queue_, &command, 0) != pdTRUE) {
+    ESP_LOGW(TAG, "%s rejected: another command is running", name);
+    if (this->last_command_sensor_ != nullptr)
+      this->last_command_sensor_->publish_state(std::string(name) + ": BUSY");
+    return;
+  }
+  this->command_busy_ = true;
+  if (this->command_busy_sensor_ != nullptr)
+    this->command_busy_sensor_->publish_state(true);
+  if (this->last_command_sensor_ != nullptr)
+    this->last_command_sensor_->publish_state(std::string(name) + ": QUEUED");
+}
+
+void WiSafe2CommandButton::press_action() {
+  if (this->parent_ != nullptr)
+    this->parent_->request_command(this->command_);
 }
 
 void WiSafe2Component::loop() {
@@ -69,6 +106,33 @@ void WiSafe2Component::loop() {
       if (this->initialized_sensor_ != nullptr)
         this->initialized_sensor_->publish_state(false);
       this->status_set_error();
+      this->command_busy_ = false;
+      if (this->command_busy_sensor_ != nullptr)
+        this->command_busy_sensor_->publish_state(false);
+    } else if (event.type == EventType::COMMAND_RESULT) {
+      const char *result = "ERROR";
+      switch (event.outcome) {
+        case CommandOutcome::ACCEPTED: result = "ACCEPTED"; break;
+        case CommandOutcome::TIMEOUT: result = "TIMEOUT"; break;
+        case CommandOutcome::PAIRED: result = "PAIRED"; break;
+        case CommandOutcome::UNPAIRED: result = "UNPAIRED"; break;
+        case CommandOutcome::ALREADY_PAIRED: result = "ALREADY PAIRED"; break;
+        case CommandOutcome::ERROR: result = "ERROR"; break;
+      }
+      const char *name = management_command_name(event.command);
+      ESP_LOGI(TAG, "%s: %s", name, result);
+      if (this->last_command_sensor_ != nullptr)
+        this->last_command_sensor_->publish_state(std::string(name) + ": " + result);
+      if (event.outcome == CommandOutcome::PAIRED || event.outcome == CommandOutcome::ALREADY_PAIRED) {
+        if (this->paired_sensor_ != nullptr)
+          this->paired_sensor_->publish_state(true);
+      } else if (event.outcome == CommandOutcome::UNPAIRED) {
+        if (this->paired_sensor_ != nullptr)
+          this->paired_sensor_->publish_state(false);
+      }
+      this->command_busy_ = false;
+      if (this->command_busy_sensor_ != nullptr)
+        this->command_busy_sensor_->publish_state(false);
     } else if (event.type == EventType::PACKET) {
       char line[PACKET_MAX * 3]{};
       size_t pos = 0;
@@ -112,6 +176,8 @@ void WiSafe2Component::dump_config() {
   ESP_LOGCONFIG(TAG, "  IRQ: GPIO%d", this->irq_pin_);
   ESP_LOGCONFIG(TAG, "  MQTT discovery prefix: %s", this->discovery_prefix_.c_str());
   ESP_LOGCONFIG(TAG, "  Discovered detectors: %u/%u", this->detector_count_, this->max_detectors_);
+  ESP_LOGCONFIG(TAG, "  Bridge identity: %06X model %04X", static_cast<unsigned>(this->bridge_device_id_),
+                this->bridge_model_id_);
 }
 
 void WiSafe2Component::radio_task_entry(void *parameter) {
@@ -139,9 +205,11 @@ void WiSafe2Component::radio_task_() {
     return;
   }
 
+  this->radio_ready_ = true;
   this->emit_event_(EventType::INITIALIZED);
   ESP_LOGI(TAG, "Entering receive mode");
   this->raw_receive_loop_();
+  this->radio_ready_ = false;
   this->emit_event_(EventType::ERROR);
   this->radio_task_handle_ = nullptr;
   vTaskDelete(nullptr);
@@ -321,12 +389,170 @@ bool WiSafe2Component::response_contains_packet_(const ExchangeResult *result, c
   for (size_t i = 0; i < result->response_len; ++i) {
     if (result->response[i] != 0x7E)
       continue;
-    size_t packet_len = i - packet_start + 1;
-    if (packet_len == expected_len && memcmp(&result->response[packet_start], expected, expected_len) == 0)
+    size_t compare_start = packet_start;
+    while (compare_start < i && result->response[compare_start] == 0x00)
+      ++compare_start;
+    size_t packet_len = i - compare_start + 1;
+    if (packet_len == expected_len && memcmp(&result->response[compare_start], expected, expected_len) == 0)
       return true;
     packet_start = i + 1;
   }
   return false;
+}
+
+bool WiSafe2Component::response_pairing_state_(const ExchangeResult *result, bool *paired) const {
+  if (result == nullptr || paired == nullptr)
+    return false;
+  size_t packet_start = 0;
+  for (size_t i = 0; i < result->response_len; ++i) {
+    if (result->response[i] != 0x7E)
+      continue;
+    while (packet_start < i && result->response[packet_start] == 0x00)
+      ++packet_start;
+    const size_t packet_length = i - packet_start + 1;
+    if (packet_length == 11 && result->response[packet_start] == 0xD4 &&
+        result->response[packet_start + 1] == 0x03) {
+      *paired = result->response[packet_start + 2] != 0x00;
+      return true;
+    }
+    packet_start = i + 1;
+  }
+  return false;
+}
+
+bool WiSafe2Component::send_expect_(const uint8_t *data, size_t length, const uint8_t *expected,
+                                    size_t expected_length, unsigned expected_packets, unsigned attempts,
+                                    ExchangeResult *last_result) {
+  static ExchangeResult result;
+  for (unsigned attempt = 0; attempt < attempts; ++attempt) {
+    esp_err_t err = this->exchange_packet_(data, length, &result, expected_packets, COMMAND_RESPONSE_TIMEOUT_MS);
+    this->log_exchange_diagnostics_(&result);
+    if (result.response_len > 0)
+      this->log_packet_("COMMAND RX: ", result.response, result.response_len);
+    if (err == ESP_OK && this->response_contains_packet_(&result, expected, expected_length)) {
+      if (last_result != nullptr)
+        *last_result = result;
+      return true;
+    }
+    if (!result.spi_reset && this->reset_spi_slave_() != ESP_OK)
+      break;
+    if (attempt + 1 < attempts)
+      vTaskDelay(pdMS_TO_TICKS(COMMAND_RETRY_DELAY_MS));
+  }
+  if (last_result != nullptr)
+    *last_result = result;
+  return false;
+}
+
+bool WiSafe2Component::transmit_packet_(const uint8_t *data, size_t length) {
+  static ExchangeResult result;
+  esp_err_t err = this->exchange_packet_(data, length, &result, 1, 250);
+  this->log_exchange_diagnostics_(&result);
+  if (result.response_len > 0)
+    this->log_packet_("COMMAND TX RESPONSE: ", result.response, result.response_len);
+  // Broadcast commands do not produce a response from remote detectors. Once
+  // every byte was clocked by the donor radio, a receive timeout is expected.
+  const bool transmitted = result.tx_count == length;
+  if (err != ESP_OK && !result.spi_reset)
+    (void) this->reset_spi_slave_();
+  return transmitted;
+}
+
+bool WiSafe2Component::query_pairing_status_(bool *paired) {
+  CommandFrames frames{};
+  if (!encode_management_command(ManagementCommand::QUERY_PAIRING, this->bridge_device_id_,
+                                 this->bridge_model_id_, &frames))
+    return false;
+
+  static ExchangeResult result;
+  for (unsigned attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; ++attempt) {
+    esp_err_t err = this->exchange_packet_(frames.primary, frames.primary_length, &result, 1,
+                                           COMMAND_RESPONSE_TIMEOUT_MS);
+    this->log_exchange_diagnostics_(&result);
+    if (result.response_len > 0)
+      this->log_packet_("PAIR STATUS RX: ", result.response, result.response_len);
+    if (err == ESP_OK && this->response_pairing_state_(&result, paired))
+      return true;
+    if (!result.spi_reset && this->reset_spi_slave_() != ESP_OK)
+      return false;
+    if (attempt + 1 < COMMAND_MAX_ATTEMPTS)
+      vTaskDelay(pdMS_TO_TICKS(COMMAND_RETRY_DELAY_MS));
+  }
+  return false;
+}
+
+WiSafe2Component::CommandOutcome WiSafe2Component::start_pairing_() {
+  bool paired = false;
+  if (!this->query_pairing_status_(&paired))
+    return CommandOutcome::TIMEOUT;
+  if (paired)
+    return CommandOutcome::ALREADY_PAIRED;
+
+  CommandFrames frames{};
+  if (!encode_management_command(ManagementCommand::START_PAIRING, this->bridge_device_id_,
+                                 this->bridge_model_id_, &frames))
+    return CommandOutcome::ERROR;
+
+  static const uint8_t accepted[] = {0x46, 0x7E};
+  static const uint8_t ready[] = {0x41, 0x7E};
+  bool activated = false;
+  static ExchangeResult result;
+  for (unsigned attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; ++attempt) {
+    esp_err_t err = this->exchange_packet_(frames.primary, frames.primary_length, &result, 2,
+                                           COMMAND_RESPONSE_TIMEOUT_MS);
+    this->log_exchange_diagnostics_(&result);
+    if (result.response_len > 0)
+      this->log_packet_("PAIR START RX: ", result.response, result.response_len);
+    if (err == ESP_OK && this->response_contains_packet_(&result, accepted, sizeof(accepted)) &&
+        this->response_contains_packet_(&result, ready, sizeof(ready))) {
+      activated = true;
+      break;
+    }
+    if (!result.spi_reset && this->reset_spi_slave_() != ESP_OK)
+      return CommandOutcome::ERROR;
+    if (attempt + 1 < COMMAND_MAX_ATTEMPTS)
+      vTaskDelay(pdMS_TO_TICKS(COMMAND_RETRY_DELAY_MS));
+  }
+  if (!activated || !this->transmit_packet_(frames.secondary, frames.secondary_length))
+    return CommandOutcome::TIMEOUT;
+
+  ESP_LOGI(TAG, "Pairing active for 21 seconds; press the test/pair button on another alarm");
+  if (this->receive_window_(PAIRING_WINDOW_MS) != ESP_OK)
+    return CommandOutcome::ERROR;
+  if (!this->query_pairing_status_(&paired))
+    return CommandOutcome::TIMEOUT;
+  return paired ? CommandOutcome::PAIRED : CommandOutcome::UNPAIRED;
+}
+
+void WiSafe2Component::execute_command_(ManagementCommand command) {
+  CommandOutcome outcome = CommandOutcome::ERROR;
+  CommandFrames frames{};
+  static const uint8_t accepted[] = {0x46, 0x7E};
+  static const uint8_t ready[] = {0x41, 0x7E};
+
+  ESP_LOGI(TAG, "Executing %s", management_command_name(command));
+  if (command == ManagementCommand::QUERY_PAIRING) {
+    bool paired = false;
+    outcome = this->query_pairing_status_(&paired) ? (paired ? CommandOutcome::PAIRED : CommandOutcome::UNPAIRED)
+                                                   : CommandOutcome::TIMEOUT;
+  } else if (command == ManagementCommand::START_PAIRING) {
+    outcome = this->start_pairing_();
+  } else if (!encode_management_command(command, this->bridge_device_id_, this->bridge_model_id_, &frames)) {
+    outcome = CommandOutcome::ERROR;
+  } else if (command == ManagementCommand::SOUND_CO || command == ManagementCommand::SOUND_FIRE ||
+             command == ManagementCommand::SOUND_COMBINED) {
+    if (this->send_expect_(frames.primary, frames.primary_length, ready, sizeof(ready), 1, 4) &&
+        this->transmit_packet_(frames.secondary, frames.secondary_length))
+      outcome = CommandOutcome::ACCEPTED;
+    else
+      outcome = CommandOutcome::TIMEOUT;
+  } else {
+    outcome = this->send_expect_(frames.primary, frames.primary_length, accepted, sizeof(accepted), 1,
+                                 COMMAND_MAX_ATTEMPTS)
+                  ? CommandOutcome::ACCEPTED
+                  : CommandOutcome::TIMEOUT;
+  }
+  this->emit_command_result_(command, outcome);
 }
 
 bool WiSafe2Component::initialize_radio_() {
@@ -365,7 +591,21 @@ void WiSafe2Component::raw_receive_loop_() {
   size_t used = 0;
   bool discarding_overflow = false;
   while (true) {
-    uint32_t timeout_ms = used > 0 ? INCOMPLETE_FRAME_TIMEOUT_MS : BYTE_TIMEOUT_MS;
+    ManagementCommand command{};
+    if (xQueueReceive(this->command_queue_, &command, 0) == pdTRUE) {
+      if (this->reset_spi_slave_() != ESP_OK)
+        return;
+      this->execute_command_(command);
+      memset(slots, 0, sizeof(slots));
+      current = 0;
+      used = 0;
+      discarding_overflow = false;
+      if (this->queue_slot_(&slots[current], 0x00) != ESP_OK)
+        return;
+      continue;
+    }
+
+    uint32_t timeout_ms = used > 0 ? INCOMPLETE_FRAME_TIMEOUT_MS : COMMAND_POLL_INTERVAL_MS;
     esp_err_t err = this->wait_for_slot_(&slots[current], pdMS_TO_TICKS(timeout_ms));
     if (err == ESP_ERR_TIMEOUT) {
       if (used > 0) {
@@ -414,6 +654,62 @@ void WiSafe2Component::raw_receive_loop_() {
   }
 }
 
+esp_err_t WiSafe2Component::receive_window_(uint32_t window_ms) {
+  SpiSlot slots[2]{};
+  unsigned current = 0;
+  if (this->queue_slot_(&slots[current], 0x00) != ESP_OK)
+    return ESP_FAIL;
+
+  uint8_t packet[PACKET_MAX]{};
+  size_t used = 0;
+  bool discarding_overflow = false;
+  const TickType_t start = xTaskGetTickCount();
+  const TickType_t overall = pdMS_TO_TICKS(window_ms);
+  while (xTaskGetTickCount() - start < overall) {
+    TickType_t elapsed = xTaskGetTickCount() - start;
+    TickType_t remaining = overall - elapsed;
+    esp_err_t err = this->wait_for_slot_(&slots[current], remaining);
+    if (err == ESP_ERR_TIMEOUT)
+      break;
+    if (err != ESP_OK) {
+      (void) this->reset_spi_slave_();
+      return err;
+    }
+
+    const uint8_t value = this->slot_rx_byte_(&slots[current]);
+    const size_t bits = slots[current].transaction.trans_len;
+    const unsigned next = current ^ 1U;
+    err = this->queue_slot_(&slots[next], 0x00);
+    if (err != ESP_OK) {
+      (void) this->reset_spi_slave_();
+      return err;
+    }
+    this->acknowledge_received_byte_();
+    current = next;
+
+    if (bits != 8)
+      ESP_LOGW(TAG, "Pairing RX used %u clocks (expected 8)", static_cast<unsigned>(bits));
+    if (discarding_overflow) {
+      if (value == 0x7E)
+        discarding_overflow = false;
+      continue;
+    }
+    if (used >= sizeof(packet)) {
+      ESP_LOGW(TAG, "Pairing frame overflow; discarding through terminator");
+      used = 0;
+      discarding_overflow = value != 0x7E;
+      continue;
+    }
+    packet[used++] = value;
+    if (value == 0x7E) {
+      this->log_packet_("PAIRING EVENT: ", packet, used);
+      this->emit_event_(EventType::PACKET, packet, used);
+      used = 0;
+    }
+  }
+  return this->reset_spi_slave_();
+}
+
 void WiSafe2Component::log_exchange_diagnostics_(const ExchangeResult *result) const {
   for (size_t i = 0; i < result->tx_count; ++i) {
     if (result->tx_bits[i] != 8)
@@ -445,6 +741,17 @@ void WiSafe2Component::emit_event_(EventType type, const uint8_t *packet, size_t
     memcpy(event.packet, packet, event.length);
   if (xQueueSend(this->event_queue_, &event, 0) != pdTRUE)
     ESP_LOGW(TAG, "Radio event queue full; dropping event");
+}
+
+void WiSafe2Component::emit_command_result_(ManagementCommand command, CommandOutcome outcome) {
+  if (this->event_queue_ == nullptr)
+    return;
+  RadioEvent event{};
+  event.type = EventType::COMMAND_RESULT;
+  event.command = command;
+  event.outcome = outcome;
+  if (xQueueSend(this->event_queue_, &event, pdMS_TO_TICKS(1000)) != pdTRUE)
+    ESP_LOGW(TAG, "Radio event queue full; dropping command result");
 }
 
 void WiSafe2Component::load_inventory_() {

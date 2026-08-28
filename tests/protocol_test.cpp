@@ -5,7 +5,11 @@
 #include "protocol.h"
 
 using esphome::wisafe2::DecodedPacket;
+using esphome::wisafe2::CommandFrames;
+using esphome::wisafe2::ManagementCommand;
 using esphome::wisafe2::decode_packet;
+using esphome::wisafe2::encode_management_command;
+using esphome::wisafe2::management_command_name;
 
 namespace {
 
@@ -33,6 +37,58 @@ template<size_t N> DecodedPacket decode(const uint8_t (&packet)[N]) {
 template<size_t N> void check_rejected(const uint8_t (&packet)[N]) {
   DecodedPacket decoded{};
   CHECK(!decode_packet(packet, N, &decoded));
+}
+
+template<size_t N> void check_frame(const uint8_t *actual, size_t actual_length, const uint8_t (&expected)[N]) {
+  CHECK(actual_length == N);
+  CHECK(std::memcmp(actual, expected, N) == 0);
+}
+
+void test_management_command_frames() {
+  constexpr uint32_t device = 0xA5B813;
+  constexpr uint16_t model = 0x1103;
+  CommandFrames frames{};
+
+  CHECK(encode_management_command(ManagementCommand::SOUND_CO, device, model, &frames));
+  const uint8_t co_announce[] = {0x70, 0xA5, 0xB8, 0x13, 0x41, 0x01, 0x11, 0x03, 0x7E};
+  const uint8_t co_transmit[] = {0x91, 0xA5, 0xB8, 0x13, 0x11, 0x03, 0x41, 0x05, 0x00, 0x02, 0x7E};
+  check_frame(frames.primary, frames.primary_length, co_announce);
+  check_frame(frames.secondary, frames.secondary_length, co_transmit);
+
+  CHECK(encode_management_command(ManagementCommand::SOUND_FIRE, device, model, &frames));
+  const uint8_t fire_announce[] = {0x70, 0xA5, 0xB8, 0x13, 0x81, 0x01, 0x11, 0x03, 0x7E};
+  const uint8_t fire_transmit[] = {0x91, 0xA5, 0xB8, 0x13, 0x11, 0x03, 0x81, 0x05, 0x00, 0x02, 0x7E};
+  check_frame(frames.primary, frames.primary_length, fire_announce);
+  check_frame(frames.secondary, frames.secondary_length, fire_transmit);
+
+  CHECK(encode_management_command(ManagementCommand::SOUND_COMBINED, device, model, &frames));
+  const uint8_t combined_announce[] = {0x70, 0xA5, 0xB8, 0x13, 0xFF, 0x01, 0x11, 0x03, 0x7E};
+  const uint8_t combined_transmit[] = {0x91, 0xA5, 0xB8, 0x13, 0x11, 0x03, 0xFF, 0x05, 0x00, 0x02, 0x7E};
+  check_frame(frames.primary, frames.primary_length, combined_announce);
+  check_frame(frames.secondary, frames.secondary_length, combined_transmit);
+
+  CHECK(encode_management_command(ManagementCommand::SILENCE_CO, device, model, &frames));
+  const uint8_t silence_co[] = {0x61, 0xA5, 0xB8, 0x13, 0x40, 0x01, 0x7E};
+  check_frame(frames.primary, frames.primary_length, silence_co);
+  CHECK(frames.secondary_length == 0);
+
+  CHECK(encode_management_command(ManagementCommand::SILENCE_FIRE, device, model, &frames));
+  const uint8_t silence_fire[] = {0x61, 0xA5, 0xB8, 0x13, 0x80, 0x01, 0x7E};
+  check_frame(frames.primary, frames.primary_length, silence_fire);
+
+  CHECK(encode_management_command(ManagementCommand::QUERY_PAIRING, device, model, &frames));
+  const uint8_t query_pairing[] = {0xD3, 0x03, 0x7E};
+  check_frame(frames.primary, frames.primary_length, query_pairing);
+
+  CHECK(encode_management_command(ManagementCommand::START_PAIRING, device, model, &frames));
+  const uint8_t start_pairing[] = {0xD3, 0x12, 0x01, 0x7E};
+  const uint8_t pairing_identity[] = {0x91, 0xA5, 0xB8, 0x13, 0x11, 0x03, 0xFF, 0x05, 0x01, 0x01, 0x7E};
+  check_frame(frames.primary, frames.primary_length, start_pairing);
+  check_frame(frames.secondary, frames.secondary_length, pairing_identity);
+
+  CHECK(!encode_management_command(ManagementCommand::SOUND_FIRE, 0x1000000, model, &frames));
+  CHECK(!encode_management_command(ManagementCommand::SOUND_FIRE, device, model, nullptr));
+  CHECK_STRING(management_command_name(ManagementCommand::SOUND_FIRE), "Sound fire test");
 }
 
 void test_observed_status_packets() {
@@ -167,6 +223,7 @@ void test_malformed_frames() {
 }  // namespace
 
 int main() {
+  test_management_command_frames();
   test_observed_status_packets();
   test_status_battery_bits();
   test_fire_test_pass();

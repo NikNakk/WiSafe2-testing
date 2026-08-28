@@ -100,6 +100,21 @@ the bridge diagnostics arrive through the native API, while only the dynamic
 detector devices use MQTT discovery. `log_topic` is also disabled to keep radio
 diagnostic logs off MQTT.
 
+### Alarm controls
+
+The bridge device exposes native Home Assistant buttons for fire, CO and
+combined interlink sound tests, fire/CO silence, checking the pairing state and
+starting a 21-second pairing window. `Network Paired`, `Radio Command Running`
+and `Last Radio Command` report command state and results. ESPHome device
+availability, `Radio Initialized` and `Bridge Uptime` replace the original
+serial heartbeat with explicit bridge and radio health reporting.
+
+The sound-test buttons confirm only that the donor radio accepted and
+transmitted the request. WiSafe2 detectors do not return individual results for
+a remotely initiated sound test. To exercise and record the self-test result of
+each detector, press that detector's physical test button. Emergency simulation
+is intentionally not exposed.
+
 ## Tests
 
 The radio packet decoder is platform-independent and has host-side coverage for
@@ -114,6 +129,14 @@ GitHub Actions runs the protocol tests, validates the ESPHome configuration and
 compiles the complete firmware for every push and pull request. CI copies the
 tracked placeholder values from `secrets.yaml.example`; real credentials remain
 in the ignored `secrets.yaml` file and are never required by the workflow.
+
+## Versioning
+
+The firmware/project version is set in `esphome.project.version` in
+`wisafe2.yaml`. The ESPHome version pinned in `.github/requirements-ci.txt` is
+the CI build toolchain version, not the project version. Release changes are
+recorded in `CHANGELOG.md`; future releases should also use annotated Git tags
+such as `v0.2.0`.
 
 ## Expected log
 
@@ -132,6 +155,7 @@ If the first TX byte times out, check power, common ground, IRQ/CS wiring and th
 
 The standalone test harness intentionally does not implement Wi-Fi, heartbeat,
 alarm entities, test commands or silence commands. Its pairing flow remains an
-automatic boot-time bench test. The ESPHome prototype now provides
-Wi-Fi/API/OTA, packet decoding and persistent MQTT-discovered detector devices;
-pairing and outbound alarm commands are still to be ported.
+automatic boot-time bench test. The ESPHome implementation provides
+Wi-Fi/API/OTA, packet decoding, persistent MQTT-discovered detector devices and
+the supported management commands. WiSafe2 does not provide a known remote
+command that individually self-tests every detector and reports its result.
