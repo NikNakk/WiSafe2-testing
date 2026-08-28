@@ -7,6 +7,7 @@
 #include "driver/spi_slave.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -43,12 +44,25 @@
 #define SPI_HOST_USED SPI2_HOST
 #define PACKET_MAX 64
 #define BYTE_TIMEOUT_MS 1000
+#define RX_ACK_PULSE_US 8
 
 static const char *TAG = "wisafe2";
 
 static void irq_set(bool asserted)
 {
     gpio_set_level(PIN_IRQ, asserted ? 1 : 0);
+}
+
+static void acknowledge_received_byte(void)
+{
+    /*
+     * FireAngelNano.ino's ReadByteFromRadio() pulses IRQ for 8 us whenever
+     * SS/CS returns HIGH after a received byte. This appears to act as a
+     * per-byte acknowledgement / flow-control signal to the radio.
+     */
+    irq_set(true);
+    esp_rom_delay_us(RX_ACK_PULSE_US);
+    irq_set(false);
 }
 
 static esp_err_t init_gpio(void)
@@ -105,6 +119,9 @@ static esp_err_t init_spi_slave(void)
 /*
  * Wait for the radio to clock exactly one unsolicited byte.
  * A zero byte is exposed on MISO while the radio clocks MOSI.
+ *
+ * After the transaction completes, reproduce the AVR receive-side handshake:
+ * pulse IRQ HIGH for 8 us, then LOW, before returning the received byte.
  */
 static esp_err_t receive_byte(uint8_t *value, TickType_t timeout)
 {
@@ -126,6 +143,8 @@ static esp_err_t receive_byte(uint8_t *value, TickType_t timeout)
         ESP_LOGW(TAG, "Unexpected SPI transaction length: %u bits", (unsigned) trans.trans_len);
     }
 
+    acknowledge_received_byte();
+
     if (value != NULL) {
         *value = rx;
     }
@@ -146,6 +165,10 @@ static esp_err_t receive_byte(uint8_t *value, TickType_t timeout)
  *   3. radio asserts CS and clocks the byte
  *   4. wait for transaction completion
  *   5. deassert IRQ
+ *
+ * Note that the separate 8 us acknowledgement pulse is only used for bytes
+ * received unsolicited from the radio, matching the AVR's asymmetric TX/RX
+ * behaviour.
  */
 static esp_err_t send_byte(uint8_t value)
 {
