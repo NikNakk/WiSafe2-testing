@@ -205,7 +205,9 @@ Home Assistant's local timezone. A physical test received before SNTP has
 synchronized still records its result, but cannot be assigned a reliable
 timestamp.
 
-## Alarm notification blueprint
+### Notification blueprints
+
+#### Real alarm notifications
 
 The repository includes a Home Assistant automation blueprint for notifying on
 real smoke, heat or carbon-monoxide alarms:
@@ -234,6 +236,30 @@ The default action creates a persistent Home Assistant notification. Replace or
 extend it when creating the automation to choose the desired recipients and
 message.
 
+#### Detector test notifications
+
+A companion blueprint runs actions whenever a detector reports a new physical
+test result:
+
+[FireAngel WiSafe2 detector test notification](blueprints/automation/fireangel_wisafe2_test_notification.yaml)
+
+It triggers from the persisted `Last test` timestamp rather than the PASS/FAIL
+state, so two consecutive tests with the same result are both detected. A short,
+configurable delay lets the companion result and event entities update before
+the actions run. A five-minute freshness check prevents an old retained test
+from generating a notification after a routine Home Assistant restart.
+Templates can use:
+
+- `test_device_id`, `test_device_name`, and `test_area_name`
+- `test_alarm_device_class` and the human-readable `test_alarm_type`
+- `test_result` and `test_event`
+- `test_entity`, `test_timestamp`, and locally formatted `test_time`
+
+Install this blueprint in the same Home Assistant blueprint directory described
+above. It covers physical detector tests. The bridge's remote sound-test
+buttons confirm radio transmission but do not generate per-detector test results,
+so they cannot activate it.
+
 ### Alarm controls
 
 The bridge device exposes native Home Assistant buttons for fire, CO and
@@ -242,6 +268,11 @@ starting a 21-second pairing window. `Network Paired`, `Radio Command Running`
 and `Last Radio Command` report command state and results. ESPHome device
 availability, `Radio Initialized` and `Bridge Uptime` replace the original
 serial heartbeat with explicit bridge and radio health reporting.
+
+The component also polls the attached module's local diagnostic state and
+network SID map every 60 seconds, and responds whenever the radio requests the
+bridge identity with `41 7E`. These are local SPI management exchanges rather
+than periodic per-detector queries or synthetic alarm-network heartbeats.
 
 The sound-test buttons confirm only that the donor radio accepted and
 transmitted the request. WiSafe2 detectors do not return individual results for
@@ -252,12 +283,13 @@ is intentionally not exposed.
 ## Tests
 
 The radio packet decoder is platform-independent and has host-side coverage for
-the observed status frames, tests, emergencies, silence, missing detectors,
-battery/base flags, extended frames and malformed input. Known packet types use
-minimum lengths because observed status and supervision variants carry trailing
-fields that are not yet understood; decoding reads only the established fixed
-offsets and preserves the complete raw frame for diagnostics. Run the tests
-without an ESP32 toolchain:
+the observed detector status frames, tests, emergencies, silence, attached-radio
+diagnostics, identity responses, battery/base flags, extended frames and
+malformed input. `D2` is treated as a diagnostic response from the attached
+radio rather than a missing-detector event. Known packet types use minimum
+lengths because observed variants carry trailing fields that are not yet
+understood; decoding reads only the established fixed offsets and preserves the
+complete raw frame for diagnostics. Run the tests without an ESP32 toolchain:
 
 ```bash
 ./tests/run_tests.sh

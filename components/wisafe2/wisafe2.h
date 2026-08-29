@@ -67,6 +67,7 @@ class WiSafe2Component : public Component {
   static constexpr uint32_t COMMAND_RETRY_DELAY_MS = 500;
   static constexpr unsigned COMMAND_MAX_ATTEMPTS = 6;
   static constexpr uint32_t PAIRING_WINDOW_MS = 21000;
+  static constexpr uint32_t LOCAL_DIAGNOSTIC_INTERVAL_MS = 60000;
   static constexpr size_t MAX_DETECTORS = 32;
   static constexpr uint32_t INVENTORY_MAGIC = 0x57533231;
   static constexpr uint32_t TEST_HISTORY_MAGIC = 0x57535431;
@@ -157,6 +158,9 @@ class WiSafe2Component : public Component {
   bool transmit_packet_(const uint8_t *data, size_t length);
   bool query_pairing_status_(bool *paired);
   CommandOutcome start_pairing_();
+  bool respond_to_identity_request_();
+  void poll_local_radio_();
+  void emit_exchange_packets_(const ExchangeResult *result);
   esp_err_t receive_window_(uint32_t window_ms);
 
   esp_err_t init_gpio_();

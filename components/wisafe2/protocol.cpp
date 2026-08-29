@@ -32,6 +32,44 @@ DetectorType detector_type_for_model(uint16_t model_id, bool has_model) {
   }
 }
 
+static uint8_t device_type_for_model(uint16_t model_id) {
+  switch (detector_type_for_model(model_id)) {
+    case DetectorType::SMOKE:
+    case DetectorType::HEAT: return 0x81;
+    case DetectorType::CARBON_MONOXIDE: return 0x41;
+    case DetectorType::UNKNOWN: return 0xFF;
+  }
+  return 0xFF;
+}
+
+bool is_identity_request(const uint8_t *packet, size_t length) {
+  return packet != nullptr && length == 2 && packet[0] == 0x41 && packet[1] == 0x7E;
+}
+
+bool encode_identity_response(uint32_t bridge_device_id, uint16_t bridge_model_id, uint8_t *frame,
+                              size_t capacity, size_t *length) {
+  static constexpr size_t FRAME_LENGTH = 11;
+  if (frame == nullptr || length == nullptr || capacity < FRAME_LENGTH || bridge_device_id > 0xFFFFFF)
+    return false;
+
+  const uint8_t response[FRAME_LENGTH] = {
+      0x91,
+      static_cast<uint8_t>((bridge_device_id >> 16) & 0xFF),
+      static_cast<uint8_t>((bridge_device_id >> 8) & 0xFF),
+      static_cast<uint8_t>(bridge_device_id & 0xFF),
+      static_cast<uint8_t>((bridge_model_id >> 8) & 0xFF),
+      static_cast<uint8_t>(bridge_model_id & 0xFF),
+      device_type_for_model(bridge_model_id),
+      0x05,
+      0x01,
+      0x01,
+      0x7E,
+  };
+  memcpy(frame, response, sizeof(response));
+  *length = sizeof(response);
+  return true;
+}
+
 const char *management_command_name(ManagementCommand command) {
   switch (command) {
     case ManagementCommand::SOUND_CO: return "Sound CO test";
@@ -179,24 +217,46 @@ bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded)
     snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[1], packet[2], packet[3]);
     snprintf(decoded->event, sizeof(decoded->event), "SILENCE");
     snprintf(decoded->base, sizeof(decoded->base), "ON");
-  } else if (packet[0] == 0xD2 && length >= 10) {
-    decoded->device_id = (static_cast<uint32_t>(packet[6]) << 16) | (static_cast<uint32_t>(packet[7]) << 8) |
-                         packet[8];
-    decoded->has_event = true;
-    decoded->has_base = true;
-    decoded->has_battery = true;
-    decoded->alarm = false;
-    decoded->base_problem = true;
-    decoded->battery_low = true;
-    snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[6], packet[7], packet[8]);
-    snprintf(decoded->event, sizeof(decoded->event), "MISSING");
-    snprintf(decoded->base, sizeof(decoded->base), "MISSING");
-    snprintf(decoded->battery, sizeof(decoded->battery), "MISSING");
   } else {
     return false;
   }
 
   decoded->recognized = true;
+  return true;
+}
+
+bool decode_radio_diagnostic(const uint8_t *packet, size_t length, RadioDiagnostic *diagnostic) {
+  // D2 is the response to the local D1 diagnostic request. Earlier bridge
+  // firmware treated every D2 frame as a missing-detector event, but observed
+  // 14-byte frames contain the attached radio's own identity and SID instead.
+  if (packet == nullptr || diagnostic == nullptr || length < 14 || packet[0] != 0xD2 ||
+      packet[length - 1] != 0x7E)
+    return false;
+
+  memset(diagnostic, 0, sizeof(*diagnostic));
+  diagnostic->battery_primary = packet[1];
+  diagnostic->battery_radio = packet[2];
+  diagnostic->unknown_1 = packet[3];
+  diagnostic->rssi = packet[4];
+  diagnostic->firmware_version = packet[5];
+  diagnostic->device_id = (static_cast<uint32_t>(packet[6]) << 16) |
+                          (static_cast<uint32_t>(packet[7]) << 8) | packet[8];
+  diagnostic->flags = packet[9];
+  diagnostic->radio_fault_count = packet[10];
+  diagnostic->sid = packet[11];
+  diagnostic->unknown_2 = packet[12];
+  diagnostic->connected = diagnostic->device_id != 0 && diagnostic->sid < 0x40;
+  return true;
+}
+
+bool decode_sid_map(const uint8_t *packet, size_t length, uint64_t *sid_map) {
+  if (packet == nullptr || sid_map == nullptr || length < 11 || packet[0] != 0xD4 || packet[1] != 0x03 ||
+      packet[length - 1] != 0x7E)
+    return false;
+
+  *sid_map = 0;
+  for (size_t i = 0; i < 8; ++i)
+    *sid_map |= static_cast<uint64_t>(packet[i + 2]) << (i * 8);
   return true;
 }
 

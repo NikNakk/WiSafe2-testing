@@ -1,0 +1,141 @@
+blueprint:
+  name: FireAngel WiSafe2 detector test notification
+  description: >-
+    Run customizable notification actions whenever a FireAngel WiSafe2 detector
+    reports a new physical test result. The detector's Last test timestamp is
+    used as the trigger, so repeated tests with the same PASS or FAIL result are
+    still detected. Remotely initiated interlink sound tests do not produce an
+    individual detector result and therefore do not trigger this automation.
+    This automation is supplementary monitoring only and does not replace
+    required alarm testing or maintenance.
+  domain: automation
+  author: Nick Kennedy
+  source_url: >-
+    https://github.com/NikNakk/fireangel-pro-connected-esphome/blob/main/blueprints/automation/fireangel_wisafe2_test_notification.yaml
+  homeassistant:
+    min_version: 2024.6.0
+  input:
+    settle_delay:
+      name: Companion-entity update delay
+      description: >-
+        Time to wait for Last test result and Last event to update from the same
+        MQTT message before running notification actions.
+      default:
+        seconds: 1
+      selector:
+        duration:
+    notifications:
+      name: Notification
+      icon: mdi:message-check
+      description: >-
+        Configure any Home Assistant actions, such as one or more mobile-app
+        notifications. Templates can use test_entity, test_device_id,
+        test_device_name, test_alarm_device_class, test_alarm_type, test_result,
+        test_event, test_area_name, test_timestamp, and test_time.
+      input:
+        notification_actions:
+          name: Notification actions
+          description: >-
+            Actions to run for each new physical detector test. Replace or extend
+            the default persistent notification as required.
+          default:
+            - action: persistent_notification.create
+              data:
+                title: "FireAngel {{ test_alarm_type }} test: {{ test_result }}"
+                message: >-
+                  {{ test_device_name }}
+                  {% if test_area_name %}in {{ test_area_name }} {% endif %}
+                  reported a {{ test_alarm_type | lower }} test result of
+                  {{ test_result }} at {{ test_time }}.
+          selector:
+            action: {}
+
+triggers:
+  - trigger: event
+    event_type: state_changed
+
+conditions:
+  - condition: template
+    value_template: >-
+      {% set entity_id = trigger.event.data.entity_id | default('', true) %}
+      {% set old = trigger.event.data.old_state %}
+      {% set new = trigger.event.data.new_state %}
+      {% set dev = device_id(entity_id) if entity_id else none %}
+      {% set occurred = as_timestamp(new.state, none) if new is not none else none %}
+      {% set age = as_timestamp(now()) - occurred if occurred is not none else none %}
+      {{ entity_id.startswith('sensor.')
+         and new is not none
+         and (old is none or old.state != new.state)
+         and occurred is not none
+         and age >= -5
+         and age <= 300
+         and new.state not in ['unknown', 'unavailable', 'none', '']
+         and new.attributes.device_class == 'timestamp'
+         and dev is not none
+         and device_attr(dev, 'manufacturer') == 'FireAngel' }}
+
+actions:
+  - delay: !input settle_delay
+  - variables:
+      test_entity: "{{ trigger.event.data.entity_id }}"
+      test_device_id: "{{ device_id(trigger.event.data.entity_id) }}"
+      test_device_name: >-
+        {% set dev = device_id(trigger.event.data.entity_id) %}
+        {{ device_attr(dev, 'name_by_user')
+           or device_attr(dev, 'name')
+           or trigger.event.data.new_state.attributes.friendly_name
+           or trigger.event.data.entity_id }}
+      test_alarm_device_class: >-
+        {% set ns = namespace(value='unknown') %}
+        {% set dev = device_id(trigger.event.data.entity_id) %}
+        {% for entity in device_entities(dev) %}
+          {% set device_class = state_attr(entity, 'device_class') %}
+          {% if entity.startswith('binary_sensor.')
+                and device_class in ['smoke', 'heat', 'carbon_monoxide'] %}
+            {% set ns.value = device_class %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.value }}
+      test_result: >-
+        {% set ns = namespace(value='UNKNOWN') %}
+        {% set dev = device_id(trigger.event.data.entity_id) %}
+        {% for entity in device_entities(dev) %}
+          {% if states(entity) in ['PASS', 'FAIL'] %}
+            {% set ns.value = states(entity) %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.value }}
+      test_event: >-
+        {% set ns = namespace(value='TEST') %}
+        {% set dev = device_id(trigger.event.data.entity_id) %}
+        {% for entity in device_entities(dev) %}
+          {% if states(entity).endswith(' TEST') %}
+            {% set ns.value = states(entity) %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.value }}
+      test_area_name: "{{ area_name(trigger.event.data.entity_id) or '' }}"
+      test_timestamp: "{{ trigger.event.data.new_state.state }}"
+      test_time: >-
+        {{ as_timestamp(trigger.event.data.new_state.state)
+           | timestamp_custom('%d %b %Y %H:%M:%S', true) }}
+  - variables:
+      test_alarm_type: >-
+        {% if test_alarm_device_class == 'carbon_monoxide' %}
+          Carbon monoxide
+        {% elif test_alarm_device_class == 'heat' %}
+          Heat
+        {% elif test_alarm_device_class == 'smoke' %}
+          Smoke
+        {% else %}
+          Detector
+        {% endif %}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ true }}"
+        sequence: !input notification_actions
+
+mode: parallel
+max: 10
+max_exceeded: warning

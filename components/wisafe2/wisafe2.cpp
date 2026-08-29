@@ -161,6 +161,40 @@ void WiSafe2Component::loop() {
         if (this->last_battery_sensor_ != nullptr)
           this->last_battery_sensor_->publish_state(decoded.battery);
         this->update_detector_(decoded, line);
+      } else {
+        RadioDiagnostic diagnostic{};
+        if (decode_radio_diagnostic(event.packet, event.length, &diagnostic)) {
+          ESP_LOGI(TAG,
+                   "Radio diagnostic device=%06X sid=%u connected=%s flags=0x%02X faults=%u "
+                   "battery=%02X/%02X rssi=0x%02X firmware=0x%02X",
+                   static_cast<unsigned>(diagnostic.device_id), diagnostic.sid,
+                   diagnostic.connected ? "yes" : "no", diagnostic.flags, diagnostic.radio_fault_count,
+                   diagnostic.battery_primary, diagnostic.battery_radio, diagnostic.rssi,
+                   diagnostic.firmware_version);
+          char device[7]{};
+          snprintf(device, sizeof(device), "%06X", static_cast<unsigned>(diagnostic.device_id));
+          if (this->last_device_sensor_ != nullptr)
+            this->last_device_sensor_->publish_state(device);
+          if (this->last_model_sensor_ != nullptr)
+            this->last_model_sensor_->publish_state("N/A");
+          if (this->last_event_sensor_ != nullptr)
+            this->last_event_sensor_->publish_state("RADIO DIAGNOSTIC");
+          if (this->last_result_sensor_ != nullptr)
+            this->last_result_sensor_->publish_state("N/A");
+          if (this->last_base_sensor_ != nullptr)
+            this->last_base_sensor_->publish_state("N/A");
+          if (this->last_battery_sensor_ != nullptr)
+            this->last_battery_sensor_->publish_state("N/A");
+          if (this->paired_sensor_ != nullptr)
+            this->paired_sensor_->publish_state(diagnostic.connected);
+        } else {
+          uint64_t sid_map = 0;
+          if (decode_sid_map(event.packet, event.length, &sid_map)) {
+            ESP_LOGI(TAG, "Radio SID map: 0x%016llX", static_cast<unsigned long long>(sid_map));
+            if (this->paired_sensor_ != nullptr)
+              this->paired_sensor_->publish_state(sid_map != 0);
+          }
+        }
       }
     }
   }
@@ -412,9 +446,9 @@ bool WiSafe2Component::response_pairing_state_(const ExchangeResult *result, boo
     while (packet_start < i && result->response[packet_start] == 0x00)
       ++packet_start;
     const size_t packet_length = i - packet_start + 1;
-    if (packet_length == 11 && result->response[packet_start] == 0xD4 &&
-        result->response[packet_start + 1] == 0x03) {
-      *paired = result->response[packet_start + 2] != 0x00;
+    uint64_t sid_map = 0;
+    if (decode_sid_map(&result->response[packet_start], packet_length, &sid_map)) {
+      *paired = sid_map != 0;
       return true;
     }
     packet_start = i + 1;
@@ -521,6 +555,59 @@ WiSafe2Component::CommandOutcome WiSafe2Component::start_pairing_() {
   return paired ? CommandOutcome::PAIRED : CommandOutcome::UNPAIRED;
 }
 
+bool WiSafe2Component::respond_to_identity_request_() {
+  uint8_t response[11]{};
+  size_t length = 0;
+  if (!encode_identity_response(this->bridge_device_id_, this->bridge_model_id_, response, sizeof(response),
+                                &length))
+    return false;
+  this->log_packet_("IDENTITY TX: ", response, length);
+  return this->transmit_packet_(response, length);
+}
+
+void WiSafe2Component::emit_exchange_packets_(const ExchangeResult *result) {
+  if (result == nullptr)
+    return;
+  size_t packet_start = 0;
+  for (size_t i = 0; i < result->response_len; ++i) {
+    if (result->response[i] != 0x7E)
+      continue;
+    while (packet_start < i && result->response[packet_start] == 0x00)
+      ++packet_start;
+    if (packet_start <= i)
+      this->emit_event_(EventType::PACKET, &result->response[packet_start], i - packet_start + 1);
+    packet_start = i + 1;
+  }
+}
+
+void WiSafe2Component::poll_local_radio_() {
+  static const uint8_t diagnostic_request[] = {0xD1, 0x7E};
+  static const uint8_t sid_map_request[] = {0xD3, 0x03, 0x7E};
+  const struct {
+    const char *name;
+    const uint8_t *data;
+    size_t length;
+  } requests[] = {
+      {"RADIO DIAGNOSTIC", diagnostic_request, sizeof(diagnostic_request)},
+      {"SID MAP", sid_map_request, sizeof(sid_map_request)},
+  };
+
+  ExchangeResult &result = this->exchange_scratch_;
+  for (const auto &request : requests) {
+    esp_err_t err = this->exchange_packet_(request.data, request.length, &result, 1,
+                                           COMMAND_RESPONSE_TIMEOUT_MS);
+    this->log_exchange_diagnostics_(&result);
+    if (result.response_len > 0) {
+      char prefix[32]{};
+      snprintf(prefix, sizeof(prefix), "%s RX: ", request.name);
+      this->log_packet_(prefix, result.response, result.response_len);
+      this->emit_exchange_packets_(&result);
+    }
+    if (err != ESP_OK && !result.spi_reset && this->reset_spi_slave_() != ESP_OK)
+      return;
+  }
+}
+
 void WiSafe2Component::execute_command_(ManagementCommand command) {
   CommandOutcome outcome = CommandOutcome::ERROR;
   CommandFrames frames{};
@@ -587,6 +674,7 @@ void WiSafe2Component::raw_receive_loop_() {
   uint8_t packet[PACKET_MAX]{};
   size_t used = 0;
   bool discarding_overflow = false;
+  TickType_t last_local_poll = xTaskGetTickCount();
   while (true) {
     ManagementCommand command{};
     if (xQueueReceive(this->command_queue_, &command, 0) == pdTRUE) {
@@ -608,6 +696,16 @@ void WiSafe2Component::raw_receive_loop_() {
       if (used > 0) {
         ESP_LOGW(TAG, "Discarding incomplete %u-byte radio frame", static_cast<unsigned>(used));
         used = 0;
+      } else if (xTaskGetTickCount() - last_local_poll >= pdMS_TO_TICKS(LOCAL_DIAGNOSTIC_INTERVAL_MS)) {
+        if (this->reset_spi_slave_() != ESP_OK)
+          return;
+        this->poll_local_radio_();
+        memset(slots, 0, sizeof(slots));
+        current = 0;
+        discarding_overflow = false;
+        last_local_poll = xTaskGetTickCount();
+        if (this->queue_slot_(&slots[current], 0x00) != ESP_OK)
+          return;
       }
       continue;
     }
@@ -646,7 +744,18 @@ void WiSafe2Component::raw_receive_loop_() {
     if (value == 0x7E) {
       this->log_packet_("PACKET: ", packet, used);
       this->emit_event_(EventType::PACKET, packet, used);
+      const bool identity_requested = is_identity_request(packet, used);
       used = 0;
+      if (identity_requested) {
+        if (this->reset_spi_slave_() != ESP_OK)
+          return;
+        if (!this->respond_to_identity_request_())
+          ESP_LOGW(TAG, "Radio identity response was not fully transmitted");
+        memset(slots, 0, sizeof(slots));
+        current = 0;
+        if (this->queue_slot_(&slots[current], 0x00) != ESP_OK)
+          return;
+      }
     }
   }
 }
@@ -701,7 +810,18 @@ esp_err_t WiSafe2Component::receive_window_(uint32_t window_ms) {
     if (value == 0x7E) {
       this->log_packet_("PAIRING EVENT: ", packet, used);
       this->emit_event_(EventType::PACKET, packet, used);
+      const bool identity_requested = is_identity_request(packet, used);
       used = 0;
+      if (identity_requested) {
+        if (this->reset_spi_slave_() != ESP_OK)
+          return ESP_FAIL;
+        if (!this->respond_to_identity_request_())
+          ESP_LOGW(TAG, "Pairing identity response was not fully transmitted");
+        memset(slots, 0, sizeof(slots));
+        current = 0;
+        if (this->queue_slot_(&slots[current], 0x00) != ESP_OK)
+          return ESP_FAIL;
+      }
     }
   }
   return this->reset_spi_slave_();

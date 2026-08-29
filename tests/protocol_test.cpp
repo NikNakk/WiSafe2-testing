@@ -8,10 +8,15 @@ using esphome::wisafe2::DecodedPacket;
 using esphome::wisafe2::CommandFrames;
 using esphome::wisafe2::DetectorType;
 using esphome::wisafe2::ManagementCommand;
+using esphome::wisafe2::RadioDiagnostic;
 using esphome::wisafe2::decode_packet;
+using esphome::wisafe2::decode_radio_diagnostic;
+using esphome::wisafe2::decode_sid_map;
 using esphome::wisafe2::detector_model_name;
 using esphome::wisafe2::detector_type_for_model;
+using esphome::wisafe2::encode_identity_response;
 using esphome::wisafe2::encode_management_command;
+using esphome::wisafe2::is_identity_request;
 using esphome::wisafe2::management_command_name;
 
 namespace {
@@ -94,6 +99,48 @@ void test_management_command_frames() {
   CHECK_STRING(management_command_name(ManagementCommand::SOUND_FIRE), "Sound fire test");
 }
 
+void test_radio_identity_frames() {
+  const uint8_t request[] = {0x41, 0x7E};
+  CHECK(is_identity_request(request, sizeof(request)));
+  const uint8_t extended_request[] = {0x41, 0x00, 0x7E};
+  CHECK(!is_identity_request(extended_request, sizeof(extended_request)));
+  CHECK(!is_identity_request(nullptr, 0));
+
+  uint8_t response[11]{};
+  size_t length = 0;
+  CHECK(encode_identity_response(0xA5B813, 0x1103, response, sizeof(response), &length));
+  const uint8_t smoke_response[] = {0x91, 0xA5, 0xB8, 0x13, 0x11, 0x03,
+                                    0x81, 0x05, 0x01, 0x01, 0x7E};
+  check_frame(response, length, smoke_response);
+
+  CHECK(encode_identity_response(0xA5B813, 0x7803, response, sizeof(response), &length));
+  const uint8_t co_response[] = {0x91, 0xA5, 0xB8, 0x13, 0x78, 0x03,
+                                 0x41, 0x05, 0x01, 0x01, 0x7E};
+  check_frame(response, length, co_response);
+  CHECK(!encode_identity_response(0x1000000, 0x1103, response, sizeof(response), &length));
+  CHECK(!encode_identity_response(0xA5B813, 0x1103, response, sizeof(response) - 1, &length));
+
+  CHECK(encode_identity_response(0xA5B813, 0xFFFF, response, sizeof(response), &length));
+  CHECK(response[6] == 0xFF);
+}
+
+void test_sid_map() {
+  const uint8_t response[] = {0xD4, 0x03, 0x88, 0x00, 0x00, 0x00,
+                              0x00, 0x00, 0x00, 0x00, 0x7E};
+  uint64_t sid_map = 0;
+  CHECK(decode_sid_map(response, sizeof(response), &sid_map));
+  CHECK(sid_map == 0x88);
+
+  const uint8_t high_sid[] = {0xD4, 0x03, 0x00, 0x00, 0x00, 0x00,
+                              0x00, 0x00, 0x00, 0x80, 0x7E};
+  CHECK(decode_sid_map(high_sid, sizeof(high_sid), &sid_map));
+  CHECK(sid_map == 0x8000000000000000ULL);
+
+  const uint8_t unknown_subtype[] = {0xD4, 0x10, 0x88, 0x00, 0x00, 0x00,
+                                     0x00, 0x00, 0x00, 0x00, 0x7E};
+  CHECK(!decode_sid_map(unknown_subtype, sizeof(unknown_subtype), &sid_map));
+}
+
 void test_observed_status_packets() {
   const uint8_t off_base[] = {0x71, 0x68, 0x96, 0x1A, 0x11, 0x04, 0x01, 0x07, 0x05, 0x7E};
   DecodedPacket decoded = decode(off_base);
@@ -173,23 +220,43 @@ void test_emergencies() {
   CHECK_STRING(decoded.event, "UNKNOWN EMERGENCY 0x99");
 }
 
-void test_silence_and_missing() {
+void test_silence() {
   const uint8_t silence[] = {0x61, 0xAA, 0xBB, 0xCC, 0x81, 0x00, 0x7E};
   DecodedPacket decoded = decode(silence);
   CHECK(decoded.device_id == 0xAABBCC);
   CHECK(!decoded.alarm);
   CHECK_STRING(decoded.event, "SILENCE");
   CHECK_STRING(decoded.base, "ON");
+}
 
-  const uint8_t missing[] = {0xD2, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0x01, 0x7E};
-  decoded = decode(missing);
-  CHECK(decoded.device_id == 0xDEAD01);
-  CHECK(!decoded.alarm);
-  CHECK(decoded.base_problem);
-  CHECK(decoded.battery_low);
-  CHECK_STRING(decoded.event, "MISSING");
-  CHECK_STRING(decoded.base, "MISSING");
-  CHECK_STRING(decoded.battery, "MISSING");
+void test_radio_diagnostic() {
+  const uint8_t packet[] = {0xD2, 0x2A, 0x38, 0x41, 0x00, 0xEF, 0xA5,
+                            0xB8, 0x13, 0x00, 0x00, 0x09, 0x40, 0x7E};
+  DecodedPacket decoded{};
+  CHECK(!decode_packet(packet, sizeof(packet), &decoded));
+
+  RadioDiagnostic diagnostic{};
+  CHECK(decode_radio_diagnostic(packet, sizeof(packet), &diagnostic));
+  CHECK(diagnostic.battery_primary == 0x2A);
+  CHECK(diagnostic.battery_radio == 0x38);
+  CHECK(diagnostic.unknown_1 == 0x41);
+  CHECK(diagnostic.rssi == 0x00);
+  CHECK(diagnostic.firmware_version == 0xEF);
+  CHECK(diagnostic.device_id == 0xA5B813);
+  CHECK(diagnostic.flags == 0x00);
+  CHECK(diagnostic.radio_fault_count == 0x00);
+  CHECK(diagnostic.sid == 0x09);
+  CHECK(diagnostic.unknown_2 == 0x40);
+  CHECK(diagnostic.connected);
+
+  const uint8_t disconnected[] = {0xD2, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA5,
+                                  0xB8, 0x13, 0x00, 0x00, 0x40, 0x00, 0x7E};
+  CHECK(decode_radio_diagnostic(disconnected, sizeof(disconnected), &diagnostic));
+  CHECK(!diagnostic.connected);
+
+  const uint8_t short_packet[] = {0xD2, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                  0xA5, 0xB8, 0x13, 0x7E};
+  CHECK(!decode_radio_diagnostic(short_packet, sizeof(short_packet), &diagnostic));
 }
 
 void test_model_catalogue() {
@@ -231,11 +298,11 @@ void test_extended_frames() {
   CHECK_STRING(decoded.event, "SILENCE");
   CHECK(!decoded.alarm);
 
-  const uint8_t missing[] = {0xD2, 0x2A, 0x38, 0x41, 0x00, 0xEF, 0x92,
-                             0xBF, 0x1A, 0x00, 0x00, 0x09, 0x40, 0x7E};
-  decoded = decode(missing);
-  CHECK(decoded.device_id == 0x92BF1A);
-  CHECK_STRING(decoded.event, "MISSING");
+  const uint8_t extended_diagnostic[] = {0xD2, 0x2A, 0x38, 0x41, 0x00, 0xEF, 0x92, 0xBF,
+                                         0x1A, 0x00, 0x00, 0x09, 0x40, 0xAA, 0x7E};
+  RadioDiagnostic diagnostic{};
+  CHECK(decode_radio_diagnostic(extended_diagnostic, sizeof(extended_diagnostic), &diagnostic));
+  CHECK(diagnostic.device_id == 0x92BF1A);
 }
 
 void test_malformed_frames() {
@@ -257,8 +324,9 @@ void test_malformed_frames() {
   const uint8_t silence_too_short[] = {0x61, 0x01, 0x02, 0x03, 0x81, 0x7E};
   check_rejected(silence_too_short);
 
-  const uint8_t missing_too_short[] = {0xD2, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0x7E};
-  check_rejected(missing_too_short);
+  const uint8_t diagnostic_not_detector[] = {0xD2, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                             0xDE, 0xAD, 0x01, 0x00, 0x00, 0x09, 0x40, 0x7E};
+  check_rejected(diagnostic_not_detector);
 
   const uint8_t no_terminator[] = {0x71, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x00};
   check_rejected(no_terminator);
@@ -273,6 +341,8 @@ void test_malformed_frames() {
 
 int main() {
   test_management_command_frames();
+  test_radio_identity_frames();
+  test_sid_map();
   test_model_catalogue();
   test_extended_frames();
   test_observed_status_packets();
@@ -280,7 +350,8 @@ int main() {
   test_fire_test_pass();
   test_co_test_failure();
   test_emergencies();
-  test_silence_and_missing();
+  test_silence();
+  test_radio_diagnostic();
   test_malformed_frames();
 
   if (failures != 0) {
