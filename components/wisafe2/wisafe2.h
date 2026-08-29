@@ -16,6 +16,7 @@
 #include "esphome/components/button/button.h"
 #include "esphome/components/mqtt/mqtt_client.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/time/real_time_clock.h"
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
 
@@ -43,6 +44,7 @@ class WiSafe2Component : public Component {
   void set_max_detectors(uint8_t max_detectors) { this->max_detectors_ = max_detectors; }
   void set_bridge_device_id(uint32_t device_id) { this->bridge_device_id_ = device_id; }
   void set_bridge_model_id(uint16_t model_id) { this->bridge_model_id_ = model_id; }
+  void set_time(time::RealTimeClock *time) { this->time_ = time; }
   void request_command(ManagementCommand command);
 
   void setup() override;
@@ -52,6 +54,8 @@ class WiSafe2Component : public Component {
 
  protected:
   static constexpr size_t PACKET_MAX = 64;
+  // Capacity is 16 bits because this radio has occasionally clocked 9-10 bits
+  // for one byte. The protocol still expects 8; trans_len records what occurred.
   static constexpr size_t SPI_SLOT_BITS = 16;
   static constexpr uint32_t BYTE_TIMEOUT_MS = 1000;
   static constexpr uint32_t RX_ACK_PULSE_US = 8;
@@ -65,6 +69,7 @@ class WiSafe2Component : public Component {
   static constexpr uint32_t PAIRING_WINDOW_MS = 21000;
   static constexpr size_t MAX_DETECTORS = 32;
   static constexpr uint32_t INVENTORY_MAGIC = 0x57533231;
+  static constexpr uint32_t TEST_HISTORY_MAGIC = 0x57535431;
 
   struct SpiSlot {
     uint32_t tx_word;
@@ -81,6 +86,8 @@ class WiSafe2Component : public Component {
     uint8_t response[PACKET_MAX];
     size_t response_bits[PACKET_MAX];
   };
+
+  ExchangeResult exchange_scratch_{};
 
   enum class EventType : uint8_t { INITIALIZED, ERROR, PACKET, COMMAND_RESULT };
 
@@ -115,6 +122,18 @@ class WiSafe2Component : public Component {
     StoredDetector detectors[MAX_DETECTORS];
   };
 
+  struct StoredTestRecord {
+    uint32_t device_id;
+    uint32_t last_test_epoch;
+    uint8_t result;
+    uint8_t reserved[3];
+  };
+
+  struct StoredTestHistory {
+    uint32_t magic;
+    StoredTestRecord detectors[MAX_DETECTORS];
+  };
+
   struct DetectorState {
     uint32_t device_id;
     uint16_t model_id;
@@ -122,6 +141,7 @@ class WiSafe2Component : public Component {
     int8_t alarm;
     int8_t base_problem;
     int8_t battery_low;
+    uint32_t last_test_epoch;
     char event[32];
     char result[12];
     char raw_frame[PACKET_MAX * 3];
@@ -133,7 +153,7 @@ class WiSafe2Component : public Component {
   void raw_receive_loop_();
   void execute_command_(ManagementCommand command);
   bool send_expect_(const uint8_t *data, size_t length, const uint8_t *expected, size_t expected_length,
-                    unsigned expected_packets, unsigned attempts, ExchangeResult *last_result = nullptr);
+                    unsigned expected_packets, unsigned attempts);
   bool transmit_packet_(const uint8_t *data, size_t length);
   bool query_pairing_status_(bool *paired);
   CommandOutcome start_pairing_();
@@ -159,6 +179,8 @@ class WiSafe2Component : public Component {
   void emit_command_result_(ManagementCommand command, CommandOutcome outcome);
   void load_inventory_();
   void save_inventory_();
+  void load_test_history_();
+  void save_test_history_();
   DetectorState *find_or_create_detector_(const DecodedPacket &decoded);
   void update_detector_(const DecodedPacket &decoded, const char *raw_frame);
   void service_mqtt_();
@@ -169,6 +191,7 @@ class WiSafe2Component : public Component {
                                  const char *entity_category, const char *icon);
   const char *model_name_(const DetectorState &detector) const;
   const char *alarm_device_class_(const DetectorState &detector) const;
+  bool format_last_test_(const DetectorState &detector, char *buffer, size_t length) const;
   void format_detector_topic_(char *buffer, size_t length, const DetectorState &detector, const char *suffix) const;
 
   gpio_num_t sclk_pin_{GPIO_NUM_NC};
@@ -195,9 +218,11 @@ class WiSafe2Component : public Component {
   uint8_t max_detectors_{16};
   uint32_t bridge_device_id_{0xA5B813};
   uint16_t bridge_model_id_{0x1103};
+  time::RealTimeClock *time_{nullptr};
   DetectorState detectors_[MAX_DETECTORS]{};
   uint8_t detector_count_{0};
   ESPPreferenceObject inventory_pref_{};
+  ESPPreferenceObject test_history_pref_{};
   bool mqtt_was_connected_{false};
   bool mqtt_resync_pending_{false};
   uint8_t mqtt_resync_index_{0};

@@ -5,6 +5,33 @@
 
 namespace esphome::wisafe2 {
 
+const char *detector_model_name(uint16_t model_id, bool has_model) {
+  if (!has_model)
+    return "Unknown FireAngel alarm";
+  switch (model_id) {
+    case 0xED08: return "FP2620W2";
+    case 0x1104: return "FP1720W2";
+    case 0x1103: return "WST-630";
+    case 0x340E: return "WST-630N";
+    case 0x7803: return "W2-CO-10X";
+    case 0xC304: return "W2-SVP-630";
+    default: return "Unknown FireAngel alarm";
+  }
+}
+
+DetectorType detector_type_for_model(uint16_t model_id, bool has_model) {
+  if (!has_model)
+    return DetectorType::UNKNOWN;
+  switch (model_id) {
+    case 0xED08:
+    case 0x1103:
+    case 0x340E: return DetectorType::SMOKE;
+    case 0x1104: return DetectorType::HEAT;
+    case 0x7803: return DetectorType::CARBON_MONOXIDE;
+    default: return DetectorType::UNKNOWN;
+  }
+}
+
 const char *management_command_name(ManagementCommand command) {
   switch (command) {
     case ManagementCommand::SOUND_CO: return "Sound CO test";
@@ -99,6 +126,8 @@ bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded)
     decoded->battery_low = false;
     snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[1], packet[2], packet[3]);
     snprintf(decoded->model, sizeof(decoded->model), "%02X%02X", packet[6], packet[7]);
+    // Both 0x81 and the observed 0x82 variant are fire-family values; captures
+    // do not establish a reliable smoke-versus-heat distinction.
     if (packet[4] == 0x81 || packet[4] == 0x82)
       snprintf(decoded->event, sizeof(decoded->event), "FIRE TEST");
     else if (packet[4] == 0x41)

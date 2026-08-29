@@ -6,8 +6,11 @@
 
 using esphome::wisafe2::DecodedPacket;
 using esphome::wisafe2::CommandFrames;
+using esphome::wisafe2::DetectorType;
 using esphome::wisafe2::ManagementCommand;
 using esphome::wisafe2::decode_packet;
+using esphome::wisafe2::detector_model_name;
+using esphome::wisafe2::detector_type_for_model;
 using esphome::wisafe2::encode_management_command;
 using esphome::wisafe2::management_command_name;
 
@@ -189,6 +192,52 @@ void test_silence_and_missing() {
   CHECK_STRING(decoded.battery, "MISSING");
 }
 
+void test_model_catalogue() {
+  CHECK_STRING(detector_model_name(0xED08), "FP2620W2");
+  CHECK_STRING(detector_model_name(0x1104), "FP1720W2");
+  CHECK_STRING(detector_model_name(0x1103), "WST-630");
+  CHECK_STRING(detector_model_name(0x340E), "WST-630N");
+  CHECK_STRING(detector_model_name(0x7803), "W2-CO-10X");
+  CHECK_STRING(detector_model_name(0xC304), "W2-SVP-630");
+  CHECK_STRING(detector_model_name(0xFFFF), "Unknown FireAngel alarm");
+  CHECK_STRING(detector_model_name(0xED08, false), "Unknown FireAngel alarm");
+
+  CHECK(detector_type_for_model(0xED08) == DetectorType::SMOKE);
+  CHECK(detector_type_for_model(0x1103) == DetectorType::SMOKE);
+  CHECK(detector_type_for_model(0x340E) == DetectorType::SMOKE);
+  CHECK(detector_type_for_model(0x1104) == DetectorType::HEAT);
+  CHECK(detector_type_for_model(0x7803) == DetectorType::CARBON_MONOXIDE);
+  CHECK(detector_type_for_model(0xC304) == DetectorType::UNKNOWN);
+  CHECK(detector_type_for_model(0xFFFF) == DetectorType::UNKNOWN);
+  CHECK(detector_type_for_model(0x7803, false) == DetectorType::UNKNOWN);
+}
+
+void test_extended_frames() {
+  // Known message types use minimum lengths. Preserve forward compatibility by
+  // decoding established offsets while ignoring trailing extension bytes.
+  const uint8_t fire_test[] = {0x70, 0x12, 0x34, 0x56, 0x82, 0x01, 0xED, 0x08, 0xAA, 0xBB, 0x7E};
+  DecodedPacket decoded = decode(fire_test);
+  CHECK_STRING(decoded.event, "FIRE TEST");
+  CHECK_STRING(decoded.result, "PASS");
+  CHECK(decoded.model_id == 0xED08);
+
+  const uint8_t emergency[] = {0x50, 0x12, 0x34, 0x56, 0x41, 0x00, 0xAA, 0x7E};
+  decoded = decode(emergency);
+  CHECK_STRING(decoded.event, "CARBON MONOXIDE EMERGENCY");
+  CHECK(decoded.alarm);
+
+  const uint8_t silence[] = {0x61, 0x12, 0x34, 0x56, 0x80, 0x01, 0xAA, 0x7E};
+  decoded = decode(silence);
+  CHECK_STRING(decoded.event, "SILENCE");
+  CHECK(!decoded.alarm);
+
+  const uint8_t missing[] = {0xD2, 0x2A, 0x38, 0x41, 0x00, 0xEF, 0x92,
+                             0xBF, 0x1A, 0x00, 0x00, 0x09, 0x40, 0x7E};
+  decoded = decode(missing);
+  CHECK(decoded.device_id == 0x92BF1A);
+  CHECK_STRING(decoded.event, "MISSING");
+}
+
 void test_malformed_frames() {
   const uint8_t terminator_only[] = {0x7E};
   check_rejected(terminator_only);
@@ -224,6 +273,8 @@ void test_malformed_frames() {
 
 int main() {
   test_management_command_frames();
+  test_model_catalogue();
+  test_extended_frames();
   test_observed_status_packets();
   test_status_battery_bits();
   test_fire_test_pass();

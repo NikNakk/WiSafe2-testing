@@ -90,15 +90,120 @@ the timing-sensitive SPI operations.
 
 Each newly heard detector ID is stored in flash and advertised with retained
 Home Assistant MQTT discovery messages. Home Assistant creates one device per
-detector, containing alarm, low-battery, base-problem, model, last-event, test
-result and raw-frame entities. Unused detector capacity is not advertised. The
-default inventory limit is 16 and can be changed with `max_detectors` up to 32.
+detector, containing alarm, low-battery, base-problem, model, last-event,
+last-test result, last-test timestamp and raw-frame entities. Unused detector
+capacity is not advertised. The default inventory limit is 16 and can be changed with `max_detectors` up to 32.
 Discovery and state are republished after an MQTT reconnect.
 
 The YAML deliberately sets ESPHome's ordinary MQTT entity discovery to false:
 the bridge diagnostics arrive through the native API, while only the dynamic
 detector devices use MQTT discovery. `log_topic` is also disabled to keep radio
 diagnostic logs off MQTT.
+
+### Suggested Home Assistant alarm card
+
+With the custom
+[auto-entities](https://github.com/thomasloven/lovelace-auto-entities) and
+[Mushroom](https://github.com/piitaya/lovelace-mushroom) cards installed, the
+following dashboard card automatically adds one row for every detector exposed
+by the bridge. It selects the detector's `Alarm` entity and obtains its
+`Battery`, `Base`, `Last test result` and `Last test` entities from the same
+Home Assistant device:
+
+```yaml
+type: custom:auto-entities
+card:
+  type: vertical-stack
+card_param: cards
+filter:
+  include:
+    - domain: binary_sensor
+      device_manufacturer: FireAngel
+      attributes:
+        device_class: "/^(smoke|heat|carbon_monoxide)$/"
+      options:
+        type: custom:mushroom-template-card
+        entity: this.entity_id
+        primary: >-
+          {% set dev = device_id(config.entity) %}
+          {{ device_attr(dev, 'name_by_user') or device_attr(dev, 'name') }}
+        secondary: >-
+          {% set dev = device_id(config.entity) %}
+          {% set ns = namespace(
+            battery='unknown',
+            base='unknown',
+            test_result='unknown',
+            last_test='unknown'
+          ) %}
+
+          {% for e in device_entities(dev) %}
+            {% if state_attr(e, 'device_class') == 'battery' %}
+              {% set ns.battery = states(e) %}
+            {% elif state_attr(e, 'device_class') == 'problem' %}
+              {% set ns.base = states(e) %}
+            {% elif e.endswith('_test_result') %}
+              {% set ns.test_result = states(e) %}
+            {% elif state_attr(e, 'device_class') == 'timestamp' %}
+              {% set ns.last_test = states(e) %}
+            {% endif %}
+          {% endfor %}
+
+          {% if is_state(config.entity, 'on') %}
+            ALARM
+          {% elif ns.battery == 'on' %}
+            Battery low
+          {% elif ns.base == 'on' %}
+            Base problem
+          {% else %}
+            Normal
+          {% endif %}
+          {% if ns.last_test not in ['unknown', 'unavailable', 'none', ''] %}
+            · Last test {{ as_timestamp(ns.last_test)
+              | timestamp_custom('%d %b %Y %H:%M', true) }}
+            {% if ns.test_result not in ['unknown', 'unavailable', 'none', ''] %}
+              ({{ ns.test_result }})
+            {% endif %}
+          {% else %}
+            · No test recorded
+          {% endif %}
+        icon: |-
+          {% if is_state(config.entity, 'on') %}
+            mdi:fire-alert
+          {% else %}
+            mdi:smoke-detector
+          {% endif %}
+        color: >-
+          {% set dev = device_id(config.entity) %}
+          {% set ns = namespace(battery=false, base=false) %}
+
+          {% for e in device_entities(dev) %}
+            {% if state_attr(e, 'device_class') == 'battery'
+                  and is_state(e, 'on') %}
+              {% set ns.battery = true %}
+            {% elif state_attr(e, 'device_class') == 'problem'
+                    and is_state(e, 'on') %}
+              {% set ns.base = true %}
+            {% endif %}
+          {% endfor %}
+
+          {% if is_state(config.entity, 'on') %}
+            red
+          {% elif ns.battery or ns.base %}
+            amber
+          {% else %}
+            green
+          {% endif %}
+sort:
+  method: name
+```
+
+The filter uses the manufacturer and alarm device-class metadata published by
+the component, so it does not depend on the ESPHome node name or generated
+entity IDs. The last test result and UTC timestamp are retained by the firmware
+and restored from flash after a reboot. The dashboard formats the timestamp in
+Home Assistant's local timezone. A physical test received before SNTP has
+synchronized still records its result, but cannot be assigned a reliable
+timestamp.
 
 ### Alarm controls
 
@@ -119,7 +224,11 @@ is intentionally not exposed.
 
 The radio packet decoder is platform-independent and has host-side coverage for
 the observed status frames, tests, emergencies, silence, missing detectors,
-battery/base flags and malformed input. Run it without an ESP32 toolchain:
+battery/base flags, extended frames and malformed input. Known packet types use
+minimum lengths because observed status and supervision variants carry trailing
+fields that are not yet understood; decoding reads only the established fixed
+offsets and preserves the complete raw frame for diagnostics. Run the tests
+without an ESP32 toolchain:
 
 ```bash
 ./tests/run_tests.sh
@@ -129,6 +238,10 @@ GitHub Actions runs the protocol tests, validates the ESPHome configuration and
 compiles the complete firmware for every push and pull request. CI copies the
 tracked placeholder values from `secrets.yaml.example`; real credentials remain
 in the ignored `secrets.yaml` file and are never required by the workflow.
+
+The host suite validates packet encoding and decoding only. SPI-slave timing,
+IRQ acknowledgement and the radio's occasional extra clocks require bench
+testing with the donor radio and are not simulated by CI.
 
 ## Versioning
 

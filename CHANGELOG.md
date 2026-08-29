@@ -6,12 +6,25 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-29
+
 ### Added
 
 - Native ESPHome controls for fire, CO, and combined interlink sound tests;
   fire and CO silence commands; pairing-state queries; and pairing initiation.
 - Pairing-state, command-running, and last-command diagnostic entities.
 - Host tests for every outbound management-command frame.
+- Coverage for extended received frames with trailing, currently unknown data.
+- A suggested auto-entities/Mushroom Home Assistant alarm dashboard card.
+- Persistent per-detector last-test results and timestamp entities.
+
+### Changed
+
+- Shortened detector entity names to `Battery` and `Base`.
+- Aligned known detector model/type inference with the existing Home Assistant
+  integration, including the WST-630N (`340E`) smoke alarm.
+- Consolidated radio exchanges onto one scratch buffer and made command-result
+  event delivery non-blocking.
 
 ## [0.2.0] - 2026-08-28
 

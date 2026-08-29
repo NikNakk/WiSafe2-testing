@@ -5,6 +5,8 @@
 
 namespace esphome::wisafe2 {
 
+enum class DetectorType : uint8_t { UNKNOWN, SMOKE, HEAT, CARBON_MONOXIDE };
+
 enum class ManagementCommand : uint8_t {
   SOUND_CO,
   SOUND_FIRE,
@@ -42,6 +44,8 @@ struct DecodedPacket {
   char battery[12];
 };
 
+const char *detector_model_name(uint16_t model_id, bool has_model = true);
+DetectorType detector_type_for_model(uint16_t model_id, bool has_model = true);
 bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded);
 bool encode_management_command(ManagementCommand command, uint32_t bridge_device_id, uint16_t bridge_model_id,
                                CommandFrames *frames);

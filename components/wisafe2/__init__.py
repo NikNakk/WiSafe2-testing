@@ -2,14 +2,15 @@ import re
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import binary_sensor, button, text_sensor
+from esphome.components import binary_sensor, button, text_sensor, time
 from esphome.const import (
     CONF_ID,
+    CONF_TIME_ID,
     ENTITY_CATEGORY_CONFIG,
     ENTITY_CATEGORY_DIAGNOSTIC,
 )
 
-DEPENDENCIES = ["esp32", "mqtt"]
+DEPENDENCIES = ["esp32", "mqtt", "time"]
 AUTO_LOAD = ["binary_sensor", "button", "text_sensor"]
 
 CONF_SCLK_PIN = "sclk_pin"
@@ -74,6 +75,7 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(WiSafe2Component),
+            cv.GenerateID(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
             cv.Required(CONF_SCLK_PIN): _GPIO,
             cv.Required(CONF_MOSI_PIN): _GPIO,
             cv.Required(CONF_MISO_PIN): _GPIO,
@@ -180,6 +182,8 @@ async def to_code(config):
     cg.add(var.set_max_detectors(config[CONF_MAX_DETECTORS]))
     cg.add(var.set_bridge_device_id(int(config[CONF_BRIDGE_DEVICE_ID], 16)))
     cg.add(var.set_bridge_model_id(int(config[CONF_BRIDGE_MODEL_ID], 16)))
+    clock = await cg.get_variable(config[CONF_TIME_ID])
+    cg.add(var.set_time(clock))
 
     if initialized_config := config.get(CONF_INITIALIZED):
         initialized = await binary_sensor.new_binary_sensor(initialized_config)

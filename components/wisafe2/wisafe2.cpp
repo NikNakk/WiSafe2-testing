@@ -34,6 +34,7 @@ void WiSafe2Component::set_pins(int sclk, int mosi, int miso, int cs, int irq) {
 void WiSafe2Component::setup() {
   ESP_LOGCONFIG(TAG, "Setting up WiSafe2 radio...");
   this->load_inventory_();
+  this->load_test_history_();
   if (this->initialized_sensor_ != nullptr)
     this->initialized_sensor_->publish_initial_state(false);
   if (this->command_busy_sensor_ != nullptr)
@@ -178,6 +179,7 @@ void WiSafe2Component::dump_config() {
   ESP_LOGCONFIG(TAG, "  Discovered detectors: %u/%u", this->detector_count_, this->max_detectors_);
   ESP_LOGCONFIG(TAG, "  Bridge identity: %06X model %04X", static_cast<unsigned>(this->bridge_device_id_),
                 this->bridge_model_id_);
+  ESP_LOGCONFIG(TAG, "  Last-test clock: %s", this->time_ != nullptr ? "configured" : "missing");
 }
 
 void WiSafe2Component::radio_task_entry(void *parameter) {
@@ -421,17 +423,14 @@ bool WiSafe2Component::response_pairing_state_(const ExchangeResult *result, boo
 }
 
 bool WiSafe2Component::send_expect_(const uint8_t *data, size_t length, const uint8_t *expected,
-                                    size_t expected_length, unsigned expected_packets, unsigned attempts,
-                                    ExchangeResult *last_result) {
-  static ExchangeResult result;
+                                    size_t expected_length, unsigned expected_packets, unsigned attempts) {
+  ExchangeResult &result = this->exchange_scratch_;
   for (unsigned attempt = 0; attempt < attempts; ++attempt) {
     esp_err_t err = this->exchange_packet_(data, length, &result, expected_packets, COMMAND_RESPONSE_TIMEOUT_MS);
     this->log_exchange_diagnostics_(&result);
     if (result.response_len > 0)
       this->log_packet_("COMMAND RX: ", result.response, result.response_len);
     if (err == ESP_OK && this->response_contains_packet_(&result, expected, expected_length)) {
-      if (last_result != nullptr)
-        *last_result = result;
       return true;
     }
     if (!result.spi_reset && this->reset_spi_slave_() != ESP_OK)
@@ -439,13 +438,11 @@ bool WiSafe2Component::send_expect_(const uint8_t *data, size_t length, const ui
     if (attempt + 1 < attempts)
       vTaskDelay(pdMS_TO_TICKS(COMMAND_RETRY_DELAY_MS));
   }
-  if (last_result != nullptr)
-    *last_result = result;
   return false;
 }
 
 bool WiSafe2Component::transmit_packet_(const uint8_t *data, size_t length) {
-  static ExchangeResult result;
+  ExchangeResult &result = this->exchange_scratch_;
   esp_err_t err = this->exchange_packet_(data, length, &result, 1, 250);
   this->log_exchange_diagnostics_(&result);
   if (result.response_len > 0)
@@ -464,7 +461,7 @@ bool WiSafe2Component::query_pairing_status_(bool *paired) {
                                  this->bridge_model_id_, &frames))
     return false;
 
-  static ExchangeResult result;
+  ExchangeResult &result = this->exchange_scratch_;
   for (unsigned attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; ++attempt) {
     esp_err_t err = this->exchange_packet_(frames.primary, frames.primary_length, &result, 1,
                                            COMMAND_RESPONSE_TIMEOUT_MS);
@@ -496,7 +493,7 @@ WiSafe2Component::CommandOutcome WiSafe2Component::start_pairing_() {
   static const uint8_t accepted[] = {0x46, 0x7E};
   static const uint8_t ready[] = {0x41, 0x7E};
   bool activated = false;
-  static ExchangeResult result;
+  ExchangeResult &result = this->exchange_scratch_;
   for (unsigned attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; ++attempt) {
     esp_err_t err = this->exchange_packet_(frames.primary, frames.primary_length, &result, 2,
                                            COMMAND_RESPONSE_TIMEOUT_MS);
@@ -560,7 +557,7 @@ bool WiSafe2Component::initialize_radio_() {
   static const uint8_t init_ok[] = {0x46, 0x7E};
   this->log_packet_("INIT TX: ", init_command, sizeof(init_command));
 
-  static ExchangeResult result;
+  ExchangeResult &result = this->exchange_scratch_;
   for (unsigned attempt = 1; attempt <= INIT_MAX_ATTEMPTS; ++attempt) {
     ESP_LOGI(TAG, "Radio initialisation attempt %u/%u", attempt, INIT_MAX_ATTEMPTS);
     esp_err_t err = this->exchange_packet_(init_command, sizeof(init_command), &result, 4, BYTE_TIMEOUT_MS);
@@ -734,6 +731,12 @@ void WiSafe2Component::log_packet_(const char *prefix, const uint8_t *data, size
 void WiSafe2Component::emit_event_(EventType type, const uint8_t *packet, size_t length) {
   if (this->event_queue_ == nullptr)
     return;
+  // Packet bursts may consume all but one slot. Reserve the final slot for a
+  // non-blocking command result so the main loop can always clear busy state.
+  if (type == EventType::PACKET && uxQueueSpacesAvailable(this->event_queue_) <= 1) {
+    ESP_LOGW(TAG, "Radio event queue nearly full; dropping packet");
+    return;
+  }
   RadioEvent event{};
   event.type = type;
   event.length = length > PACKET_MAX ? PACKET_MAX : length;
@@ -750,7 +753,7 @@ void WiSafe2Component::emit_command_result_(ManagementCommand command, CommandOu
   event.type = EventType::COMMAND_RESULT;
   event.command = command;
   event.outcome = outcome;
-  if (xQueueSend(this->event_queue_, &event, pdMS_TO_TICKS(1000)) != pdTRUE)
+  if (xQueueSend(this->event_queue_, &event, 0) != pdTRUE)
     ESP_LOGW(TAG, "Radio event queue full; dropping command result");
 }
 
@@ -771,6 +774,42 @@ void WiSafe2Component::load_inventory_() {
     this->detectors_[i].battery_low = -1;
   }
   ESP_LOGI(TAG, "Restored %u detector(s) from flash", this->detector_count_);
+}
+
+void WiSafe2Component::load_test_history_() {
+  this->test_history_pref_ = global_preferences->make_preference<StoredTestHistory>(0x7A80D9C2, true);
+  StoredTestHistory stored{};
+  if (!this->test_history_pref_.load(&stored) || stored.magic != TEST_HISTORY_MAGIC) {
+    ESP_LOGI(TAG, "No valid stored detector test history");
+    return;
+  }
+  for (uint8_t i = 0; i < this->detector_count_; ++i) {
+    for (const auto &record : stored.detectors) {
+      if (record.device_id != this->detectors_[i].device_id)
+        continue;
+      this->detectors_[i].last_test_epoch = record.last_test_epoch;
+      if (record.result == 1)
+        snprintf(this->detectors_[i].result, sizeof(this->detectors_[i].result), "PASS");
+      else if (record.result == 2)
+        snprintf(this->detectors_[i].result, sizeof(this->detectors_[i].result), "FAIL");
+      break;
+    }
+  }
+}
+
+void WiSafe2Component::save_test_history_() {
+  StoredTestHistory stored{};
+  stored.magic = TEST_HISTORY_MAGIC;
+  for (uint8_t i = 0; i < this->detector_count_; ++i) {
+    stored.detectors[i].device_id = this->detectors_[i].device_id;
+    stored.detectors[i].last_test_epoch = this->detectors_[i].last_test_epoch;
+    if (strcmp(this->detectors_[i].result, "PASS") == 0)
+      stored.detectors[i].result = 1;
+    else if (strcmp(this->detectors_[i].result, "FAIL") == 0)
+      stored.detectors[i].result = 2;
+  }
+  if (!this->test_history_pref_.save(&stored))
+    ESP_LOGW(TAG, "Failed to persist detector test history");
 }
 
 void WiSafe2Component::save_inventory_() {
@@ -828,10 +867,19 @@ void WiSafe2Component::update_detector_(const DecodedPacket &decoded, const char
     detector->battery_low = decoded.battery_low ? 1 : 0;
   if (decoded.has_event)
     snprintf(detector->event, sizeof(detector->event), "%s", decoded.event);
-  if (decoded.has_result)
+  if (decoded.has_result) {
     snprintf(detector->result, sizeof(detector->result), "%s", decoded.result);
-  else
-    detector->result[0] = '\0';
+    detector->last_test_epoch = 0;
+    if (this->time_ != nullptr) {
+      ESPTime now = this->time_->utcnow();
+      if (now.is_valid())
+        detector->last_test_epoch = static_cast<uint32_t>(now.timestamp);
+      else
+        ESP_LOGW(TAG, "Test received from %06X before time synchronization",
+                 static_cast<unsigned>(detector->device_id));
+    }
+    this->save_test_history_();
+  }
   snprintf(detector->raw_frame, sizeof(detector->raw_frame), "%s", raw_frame);
   if (inventory_changed)
     this->save_inventory_();
@@ -890,22 +938,16 @@ void WiSafe2Component::format_detector_topic_(char *buffer, size_t length, const
 }
 
 const char *WiSafe2Component::model_name_(const DetectorState &detector) const {
-  if (!detector.has_model)
-    return "Unknown FireAngel alarm";
-  switch (detector.model_id) {
-    case 0xED08: return "FP2620W2";
-    case 0x1104: return "FP1720W2";
-    case 0x1103: return "WST-630";
-    case 0x7803: return "W2-CO-10X";
-    case 0xC304: return "W2-SVP-630";
-    default: return "Unknown FireAngel alarm";
-  }
+  return detector_model_name(detector.model_id, detector.has_model);
 }
 
 const char *WiSafe2Component::alarm_device_class_(const DetectorState &detector) const {
-  if ((detector.has_model && detector.model_id == 0x7803) || strstr(detector.event, "CARBON MONOXIDE") != nullptr)
+  // Match MODEL_DEVICE_TYPES in fireangel-pro-connected-component. C304 is
+  // deliberately not inferred because donor-module type may not match role.
+  DetectorType type = detector_type_for_model(detector.model_id, detector.has_model);
+  if (type == DetectorType::CARBON_MONOXIDE || strstr(detector.event, "CARBON MONOXIDE") != nullptr)
     return "carbon_monoxide";
-  if (detector.has_model && detector.model_id == 0x1104)
+  if (type == DetectorType::HEAT)
     return "heat";
   return "smoke";
 }
@@ -968,21 +1010,31 @@ bool WiSafe2Component::publish_discovery_entity_(const DetectorState &detector, 
       0, true);
 }
 
+bool WiSafe2Component::format_last_test_(const DetectorState &detector, char *buffer, size_t length) const {
+  if (detector.last_test_epoch == 0 || buffer == nullptr || length == 0)
+    return false;
+  ESPTime timestamp = ESPTime::from_epoch_utc(detector.last_test_epoch);
+  return timestamp.is_valid() && timestamp.strftime(buffer, length, "%Y-%m-%dT%H:%M:%SZ") > 0;
+}
+
 bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector) {
   bool ok = true;
   ok &= this->publish_discovery_entity_(detector, "binary_sensor", "alarm", "Alarm", "{{ value_json.alarm }}",
                                         this->alarm_device_class_(detector), nullptr, nullptr);
-  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "battery_low", "Battery low",
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "battery_low", "Battery",
                                         "{{ value_json.battery_low }}", "battery", "diagnostic", nullptr);
-  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "base_problem", "Base problem",
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "base_problem", "Base",
                                         "{{ value_json.base_problem }}", "problem", "diagnostic", nullptr);
   ok &= this->publish_discovery_entity_(detector, "sensor", "model", "Model", "{{ value_json.model }}", nullptr,
                                         "diagnostic", "mdi:smoke-detector-variant");
   ok &= this->publish_discovery_entity_(detector, "sensor", "last_event", "Last event",
                                         "{{ value_json.event }}", nullptr, nullptr, "mdi:message-alert-outline");
-  ok &= this->publish_discovery_entity_(detector, "sensor", "test_result", "Test result",
+  ok &= this->publish_discovery_entity_(detector, "sensor", "test_result", "Last test result",
                                         "{{ value_json.test_result }}", nullptr, "diagnostic",
                                         "mdi:check-decagram-outline");
+  ok &= this->publish_discovery_entity_(detector, "sensor", "last_test", "Last test",
+                                        "{{ value_json.last_test }}", "timestamp", "diagnostic",
+                                        "mdi:clock-check-outline");
   ok &= this->publish_discovery_entity_(detector, "sensor", "raw_frame", "Last raw frame",
                                         "{{ value_json.raw_frame }}", nullptr, "diagnostic", "mdi:code-tags");
   return ok;
@@ -991,6 +1043,8 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
 bool WiSafe2Component::publish_detector_state_(const DetectorState &detector) {
   char topic[128];
   char model[16];
+  char last_test[32];
+  bool has_last_test = this->format_last_test_(detector, last_test, sizeof(last_test));
   this->format_detector_topic_(topic, sizeof(topic), detector, "state");
   if (detector.has_model)
     snprintf(model, sizeof(model), "%04X", detector.model_id);
@@ -1009,6 +1063,7 @@ bool WiSafe2Component::publish_detector_state_(const DetectorState &detector) {
         root["model_name"] = this->model_name_(detector);
         root["event"] = detector.event[0] != '\0' ? detector.event : nullptr;
         root["test_result"] = detector.result[0] != '\0' ? detector.result : nullptr;
+        root["last_test"] = has_last_test ? last_test : nullptr;
         root["raw_frame"] = detector.raw_frame[0] != '\0' ? detector.raw_frame : nullptr;
       },
       0, true);
