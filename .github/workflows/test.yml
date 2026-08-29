@@ -44,6 +44,9 @@ jobs:
       - name: Install ESPHome
         run: python -m pip install --requirement .github/requirements-ci.txt
 
+      - name: Validate Home Assistant blueprint
+        run: python tests/validate_blueprint.py
+
       - name: Create CI secrets
         run: cp secrets.yaml.example secrets.yaml
 

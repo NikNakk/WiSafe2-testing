@@ -205,6 +205,35 @@ Home Assistant's local timezone. A physical test received before SNTP has
 synchronized still records its result, but cannot be assigned a reliable
 timestamp.
 
+## Alarm notification blueprint
+
+The repository includes a Home Assistant automation blueprint for notifying on
+real smoke, heat or carbon-monoxide alarms:
+
+[FireAngel WiSafe2 real alarm notification](blueprints/automation/fireangel_wisafe2_alarm_notification.yaml)
+
+It automatically covers detectors discovered after the automation is created.
+A server-side `state_changed` trigger selects FireAngel alarm binary sensors by
+manufacturer and device class, so renamed entities and the frontend registry
+cache do not affect it. Only a transition of the detector's `Alarm` entity to
+`on` is actionable; physical and remote test packets leave that entity off and
+do not trigger notifications.
+
+To install it, copy the blueprint to
+`config/blueprints/automation/fireangel_wisafe2/` in Home Assistant, reload
+automation blueprints, and create an automation from it. Its action selector can
+send mobile-app notifications, persistent notifications, announcements or any
+other Home Assistant action. Notification templates can use:
+
+- `alarm_entity` and `alarm_entity_name`
+- `alarm_device_id` and `alarm_device_name`
+- `alarm_device_class` and the human-readable `alarm_type`
+- `alarm_area_name` and `alarm_time`
+
+The default action creates a persistent Home Assistant notification. Replace or
+extend it when creating the automation to choose the desired recipients and
+message.
+
 ### Alarm controls
 
 The bridge device exposes native Home Assistant buttons for fire, CO and

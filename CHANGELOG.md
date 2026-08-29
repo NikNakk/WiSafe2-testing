@@ -6,6 +6,11 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A customizable Home Assistant blueprint for notifications from real smoke,
+  heat, and carbon-monoxide alarm events.
+
 ## [0.3.0] - 2026-08-29
 
 ### Added

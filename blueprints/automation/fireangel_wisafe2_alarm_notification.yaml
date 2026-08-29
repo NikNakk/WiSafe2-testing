@@ -1,0 +1,114 @@
+blueprint:
+  name: FireAngel WiSafe2 real alarm notification
+  description: >-
+    Run customizable notification actions when any MQTT-discovered FireAngel
+    WiSafe2 alarm reports a real smoke, heat, or carbon-monoxide event. Physical
+    and remotely initiated test events are ignored because they do not activate
+    the detector Alarm binary sensor. This automation is supplementary
+    monitoring only and is not part of the certified life-safety system.
+  domain: automation
+  author: Nick Kennedy
+  source_url: >-
+    https://github.com/NikNakk/fireangel-pro-connected-esphome/blob/main/blueprints/automation/fireangel_wisafe2_alarm_notification.yaml
+  homeassistant:
+    min_version: 2024.6.0
+  input:
+    monitored_alarm_types:
+      name: Alarm types
+      description: Select the real alarm types that should run the notification actions.
+      default:
+        - smoke
+        - heat
+        - carbon_monoxide
+      selector:
+        select:
+          multiple: true
+          options:
+            - label: Smoke
+              value: smoke
+            - label: Heat
+              value: heat
+            - label: Carbon monoxide
+              value: carbon_monoxide
+    notifications:
+      name: Notification
+      icon: mdi:message-alert
+      description: >-
+        Configure any Home Assistant actions, such as one or more mobile-app
+        notifications. Templates can use alarm_entity, alarm_entity_name,
+        alarm_device_id, alarm_device_name, alarm_device_class, alarm_type,
+        alarm_area_name, and alarm_time.
+      input:
+        notification_actions:
+          name: Notification actions
+          description: >-
+            Actions to run for each real alarm transition. Replace or extend the
+            default persistent notification as required.
+          default:
+            - action: persistent_notification.create
+              data:
+                title: "FireAngel {{ alarm_type }} alarm"
+                message: >-
+                  {{ alarm_device_name }}
+                  {% if alarm_area_name %}in {{ alarm_area_name }} {% endif %}
+                  reported a real {{ alarm_type | lower }} alarm at
+                  {{ alarm_time }}.
+          selector:
+            action: {}
+
+variables:
+  monitored_alarm_types: !input monitored_alarm_types
+
+triggers:
+  - trigger: event
+    event_type: state_changed
+
+conditions:
+  - condition: template
+    value_template: >-
+      {% set entity_id = trigger.event.data.entity_id | default('', true) %}
+      {% set old = trigger.event.data.old_state %}
+      {% set new = trigger.event.data.new_state %}
+      {% set dev = device_id(entity_id) if entity_id else none %}
+      {{ entity_id.startswith('binary_sensor.')
+         and new is not none
+         and new.state == 'on'
+         and (old is none or old.state != 'on')
+         and new.attributes.device_class in monitored_alarm_types
+         and dev is not none
+         and device_attr(dev, 'manufacturer') == 'FireAngel' }}
+
+actions:
+  - variables:
+      alarm_entity: "{{ trigger.event.data.entity_id }}"
+      alarm_entity_name: >-
+        {{ trigger.event.data.new_state.attributes.friendly_name
+           | default(trigger.event.data.entity_id, true) }}
+      alarm_device_id: "{{ device_id(trigger.event.data.entity_id) }}"
+      alarm_device_name: >-
+        {% set dev = device_id(trigger.event.data.entity_id) %}
+        {{ device_attr(dev, 'name_by_user')
+           or device_attr(dev, 'name')
+           or trigger.event.data.new_state.attributes.friendly_name
+           or trigger.event.data.entity_id }}
+      alarm_device_class: "{{ trigger.event.data.new_state.attributes.device_class }}"
+      alarm_type: >-
+        {% set device_class = trigger.event.data.new_state.attributes.device_class %}
+        {% if device_class == 'carbon_monoxide' %}
+          Carbon monoxide
+        {% elif device_class == 'heat' %}
+          Heat
+        {% else %}
+          Smoke
+        {% endif %}
+      alarm_area_name: "{{ area_name(trigger.event.data.entity_id) or '' }}"
+      alarm_time: "{{ now().strftime('%d %b %Y %H:%M:%S') }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ true }}"
+        sequence: !input notification_actions
+
+mode: parallel
+max: 10
+max_exceeded: warning
