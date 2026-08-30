@@ -1,0 +1,7 @@
+Ref,Qty,Part,Notes
+"J1,J2",2,1x7 2.54mm female socket,XIAO ESP32-S3
+J3,1,2x5 2.54mm female socket,WiSafe2 radio
+J4,1,1x2 2.54mm female socket,WiSafe2 ANT/GND
+ANT1,1,large plated through-hole pad,~86 mm antenna wire
+H1-H4,4,2.7mm mounting hole,M2.5 hardware
+MODULE1,1,Seeed Studio XIAO ESP32-S3,plain version

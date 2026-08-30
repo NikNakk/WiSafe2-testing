@@ -1,0 +1,6 @@
+Rev 10 routing audit
+====================
+Vias: 2
+Same-layer different-net intersections: 0
+Track-to-unrelated-pad clearances <0.25 mm: 0
+Via-to-unrelated-pad clearances <0.25 mm: 0
