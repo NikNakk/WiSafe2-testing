@@ -121,7 +121,11 @@ have a different meaning on another detector model.
 The YAML deliberately sets ESPHome's ordinary MQTT entity discovery to false:
 the bridge diagnostics arrive through the native API, while only the dynamic
 detector devices use MQTT discovery. `log_topic` is also disabled to keep radio
-diagnostic logs off MQTT.
+diagnostic logs off MQTT. On ESP-IDF, `idf_send_async` keeps broker I/O on a
+separate task so a slow MQTT publish cannot block ESPHome's main loop while a
+detector diagnostic packet is being processed. The component also processes
+radio events in bounded batches, yielding between bursts without affecting the
+dedicated SPI task.
 
 ### Suggested Home Assistant alarm card
 

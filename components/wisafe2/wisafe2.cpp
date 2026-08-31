@@ -17,6 +17,7 @@ namespace esphome::wisafe2 {
 
 static const char *const TAG = "wisafe2";
 static constexpr spi_host_device_t SPI_HOST_USED = SPI2_HOST;
+static constexpr uint8_t MAX_EVENTS_PER_LOOP = 4;
 #if CONFIG_FREERTOS_UNICORE
 static constexpr BaseType_t RADIO_TASK_CORE = 0;
 #else
@@ -100,7 +101,12 @@ void WiSafe2Component::loop() {
     return;
 
   RadioEvent event{};
-  while (xQueueReceive(this->event_queue_, &event, 0) == pdTRUE) {
+  uint8_t processed = 0;
+  // Yield to ESPHome after a small batch so packet bursts cannot monopolize
+  // the main loop. The dedicated radio task continues servicing SPI and the
+  // queue retains the remaining events for the next loop invocation.
+  while (processed < MAX_EVENTS_PER_LOOP && xQueueReceive(this->event_queue_, &event, 0) == pdTRUE) {
+    ++processed;
     if (event.type == EventType::INITIALIZED) {
       if (this->initialized_sensor_ != nullptr)
         this->initialized_sensor_->publish_state(true);

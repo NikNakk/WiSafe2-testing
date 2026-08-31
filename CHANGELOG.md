@@ -15,6 +15,12 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Home Assistant devices after a radio reset or temporary topology change.
 - The ST-630-DE smoke detector model mapping (`7C04`) documented by ws2mqtt.
 
+### Changed
+
+- MQTT sends now use ESPHome's asynchronous ESP-IDF path, and radio events are
+  processed in bounded main-loop batches. This prevents detector discovery and
+  diagnostic publication from blocking other ESPHome components for seconds.
+
 ### Documentation
 
 - Clarified why remote diagnostic battery bytes and flags cannot safely be used
