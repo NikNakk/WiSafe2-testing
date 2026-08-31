@@ -260,17 +260,40 @@ void test_observed_status_packets() {
   CHECK_STRING(decoded.base, "ON");
 }
 
-void test_status_battery_bits() {
-  const uint8_t low_bit_1[] = {0x71, 0x01, 0x02, 0x03, 0xED, 0x08, 0x46, 0x7E};
-  DecodedPacket decoded = decode(low_bit_1);
+void test_status_flags() {
+  // DeviceTest2.txt captured this frame from FireAngel's Connected Gateway;
+  // its own firmware reports model 0x08ED and names bit 0 CALIBRATED.
+  const uint8_t official_capture[] = {0x71, 0x2D, 0x8D, 0x01, 0xED, 0x08,
+                                      0x01, 0x07, 0x09, 0x7E};
+  DecodedPacket decoded = decode(official_capture);
+  CHECK(decoded.has_status_flags);
+  CHECK(decoded.status_flags == esphome::wisafe2::STATUS_FLAG_CALIBRATED);
+  CHECK(decoded.calibrated);
+  CHECK(!decoded.device_fault);
+  CHECK(decoded.base_problem);
+  CHECK(!decoded.sensor_battery_fault);
+  CHECK(!decoded.ac_power_fault);
+  CHECK(!decoded.radio_battery_fault);
+  CHECK(!decoded.battery_low);
+
+  const uint8_t named_flags[] = {0x71, 0x01, 0x02, 0x03, 0xED, 0x08, 0x3F, 0x7E};
+  decoded = decode(named_flags);
+  CHECK(decoded.calibrated);
+  CHECK(decoded.device_fault);
   CHECK(!decoded.base_problem);
+  CHECK(decoded.sensor_battery_fault);
+  CHECK(decoded.ac_power_fault);
+  CHECK(decoded.radio_battery_fault);
   CHECK(decoded.battery_low);
   CHECK_STRING(decoded.battery, "LOW");
 
-  const uint8_t low_bit_2[] = {0x71, 0x01, 0x02, 0x03, 0xED, 0x08, 0x02, 0x7E};
-  decoded = decode(low_bit_2);
-  CHECK(decoded.base_problem);
-  CHECK(decoded.battery_low);
+  const uint8_t non_battery_flags[] = {0x71, 0x01, 0x02, 0x03, 0xED, 0x08, 0xC2, 0x7E};
+  decoded = decode(non_battery_flags);
+  CHECK(decoded.device_fault);
+  CHECK(!decoded.sensor_battery_fault);
+  CHECK(!decoded.radio_battery_fault);
+  CHECK(!decoded.battery_low);
+  CHECK_STRING(decoded.battery, "OK");
 }
 
 void test_fire_test_pass() {
@@ -460,7 +483,7 @@ int main() {
   test_model_catalogue();
   test_extended_frames();
   test_observed_status_packets();
-  test_status_battery_bits();
+  test_status_flags();
   test_fire_test_pass();
   test_co_test_failure();
   test_emergencies();

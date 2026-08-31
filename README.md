@@ -93,9 +93,12 @@ Home Assistant MQTT discovery messages. Home Assistant creates one device per
 detector, containing alarm, low-battery, base-problem, model, last-event,
 last-test result, last-test timestamp, raw-frame and remote-radio diagnostic
 entities, including whether each retained detector is present in the latest
-network SID map. The bridge walks the radio's SID map to identify paired
-detectors and also reacts immediately when the radio announces a newly paired
-SID. Each detector also exposes Home Assistant device triggers for alarm
+network SID map. Live `71` status frames additionally expose calibrated,
+generic device-fault, on-base, detector-battery-fault, AC-failure and
+radio-module-battery-fault states, plus the complete raw status byte. The bridge
+walks the radio's SID map to identify paired detectors and also reacts
+immediately when the radio announces a newly paired SID. Each detector also
+exposes Home Assistant device triggers for alarm
 detected, alarm cleared, physical test passed and physical test failed. These
 events are not retained, so reconnecting Home Assistant or the broker cannot
 replay an old alarm or test as a new trigger. Alarm
@@ -159,17 +162,19 @@ filter:
         secondary: >-
           {% set dev = device_id(config.entity) %}
           {% set ns = namespace(
-            battery='unknown',
-            base='unknown',
+            battery_low=false,
+            problem=false,
             test_result='unknown',
             last_test='unknown'
           ) %}
 
           {% for e in device_entities(dev) %}
-            {% if state_attr(e, 'device_class') == 'battery' %}
-              {% set ns.battery = states(e) %}
-            {% elif state_attr(e, 'device_class') == 'problem' %}
-              {% set ns.base = states(e) %}
+            {% if state_attr(e, 'device_class') == 'battery'
+                  and is_state(e, 'on') %}
+              {% set ns.battery_low = true %}
+            {% elif state_attr(e, 'device_class') == 'problem'
+                    and is_state(e, 'on') %}
+              {% set ns.problem = true %}
             {% elif e.endswith('_test_result') %}
               {% set ns.test_result = states(e) %}
             {% elif state_attr(e, 'device_class') == 'timestamp' %}
@@ -179,10 +184,10 @@ filter:
 
           {% if is_state(config.entity, 'on') %}
             ALARM
-          {% elif ns.battery == 'on' %}
+          {% elif ns.battery_low %}
             Battery low
-          {% elif ns.base == 'on' %}
-            Base problem
+          {% elif ns.problem %}
+            Detector problem
           {% else %}
             Normal
           {% endif %}
@@ -203,7 +208,7 @@ filter:
           {% endif %}
         color: >-
           {% set dev = device_id(config.entity) %}
-          {% set ns = namespace(battery=false, base=false) %}
+          {% set ns = namespace(battery=false, problem=false) %}
 
           {% for e in device_entities(dev) %}
             {% if state_attr(e, 'device_class') == 'battery'
@@ -211,13 +216,13 @@ filter:
               {% set ns.battery = true %}
             {% elif state_attr(e, 'device_class') == 'problem'
                     and is_state(e, 'on') %}
-              {% set ns.base = true %}
+              {% set ns.problem = true %}
             {% endif %}
           {% endfor %}
 
           {% if is_state(config.entity, 'on') %}
             red
-          {% elif ns.battery or ns.base %}
+          {% elif ns.battery or ns.problem %}
             amber
           {% else %}
             green
@@ -322,27 +327,29 @@ is intentionally not exposed.
 This project draws on two independent, reverse-engineered implementations:
 [C19HOP/WiSafe2-to-HomeAssistant-Bridge](https://github.com/C19HOP/WiSafe2-to-HomeAssistant-Bridge)
 and [Tho85/ws2mqtt](https://github.com/Tho85/ws2mqtt). Neither is an official
-WiSafe2 protocol specification. Where they disagree, the difference is kept
-explicit below rather than treating either interpretation as authoritative.
+WiSafe2 protocol specification, although C19HOP's repository includes
+[captured debug output](https://github.com/C19HOP/WiSafe2-to-HomeAssistant-Bridge/blob/master/FireAngelProConnectedGateway/DeviceTest2.txt)
+from FireAngel's own Connected Gateway firmware. Where the two implementations
+disagree, that manufacturer-firmware evidence is preferred.
 
 | Area | C19HOP bridge | ws2mqtt | This ESPHome component |
 |---|---|---|---|
 | Hardware and transport | Arduino Nano acting as the SPI slave, with a USB serial connection to Home Assistant. | Arduino/ATmega SPI-to-UART adapter plus a separate ESP32 MQTT gateway. | ESP32-S3 talks to the radio directly as an SPI slave and runs ESPHome, eliminating the intermediate microcontroller and serial protocol. |
 | Detector inventory | Detector IDs are learned from received traffic and configured manually in the supplied Home Assistant templates. | Maintains a device database, walks the `D4 03` SID map, resolves unknown SIDs with `D3 06 <sid> 01`, and reacts to `D4 09` join notifications. | Uses the ws2mqtt-style SID discovery flow, persists the resulting inventory, and creates detector devices using MQTT discovery. |
 | Remote diagnostics | Primarily derives detector state from unsolicited network traffic. | Supports `D3 06 <sid> 00` remote diagnostic requests, although its README recommends avoiding routine active queries to conserve detector batteries. | Queries a detector while discovering it and exposes an explicit **Refresh Detector Diagnostics** button. Remote requests are serialized and may take tens of seconds because the radio returns `C4`/`D4 06` asynchronously. It does not periodically poll individual detectors; only the attached radio and SID map are polled every 60 seconds. |
-| `71` status flags | The published analysis treats `04` as docked/on-base and `02` or `40` as low-battery indications. | The source names `02` as a generic fault, `04` as docked, `08` as detector-battery low, and `20` as radio-battery low. | Retains the C19HOP-compatible interpretation because it matches the captures and tests used for this project. The conflicting `08`/`20` interpretation remains unresolved and needs hardware captures before changing entities. |
+| `71` status flags | The original published analysis treats `04` as docked/on-base and `02` or `40` as low-battery indications. Its captured official-gateway log instead names bits `01` calibrated, `02` faulty, `04` on-base, `08` detector-battery fault, `10` AC failed and `20` radio-module-battery fault. | Exposes generic fault (`02`), docked (`04`), detector battery (`08`) and radio-module battery (`20`) binary sensors. | Uses all six names from the FireAngel gateway log. Separate binary sensors expose each meaning, `Battery` remains a compatibility OR of `08` and `20`, `Base` remains the inverse of `04`, and the raw byte preserves unnamed bits `40` and `80`. |
 | Alarm state | Focuses on event reporting through serial/Home Assistant templates. | Handles live alarm-on and alarm-off traffic and deliberately starts alarm state as unknown because it cannot be queried. | Likewise changes alarm state only from live `50`/`51` events. Diagnostic polling never assumes that an alarm is off. |
 | Reserved-byte framing | The available SPI analysis does not describe a separate byte-stuffing layer. | Explicitly maps payload `7E` to `7D 01` and payload `7D` to `7D 02`. | Applies the ws2mqtt mapping on every SPI transmit and receive path while leaving the final `7E` delimiter unescaped. |
 | Inventory removal | Has no comparable persistent automatic database to reconcile. | Clears its device database when the attached radio reports the unpaired/reset SID state (`D2` SID `40`). | Deliberately retains previously discovered detectors. A per-detector `Network member` diagnostic shows whether each retained entry is present in the latest SID map, avoiding silent Home Assistant device deletion after a transient reset or radio replacement. |
 | Trailing packet fields | Unknown trailing bytes are generally passed through or ignored. | Some receive structures label trailing bytes as SID and sequence metadata. | Accepts extended frames but reads only independently established offsets. The possible SID/sequence fields remain undecoded until captures confirm their meaning across packet types. |
 | Command pacing | Timing follows the Nano firmware's blocking SPI/IRQ flow. | Enforces a minimum interval of approximately 500 ms between transmissions. | Enforces a 500 ms quiet interval after transmitted and received frames before issuing another command. This also accommodates asynchronous `C4` identity and `D4 06` status replies observed on real hardware. |
-| Model catalogue | Documents the FP2620W2, FP1720W2, WST-630, W2-SVP-630 and W2-CO-10X devices used by that project. | Also reports testing with the ST-630-DE(P) and HT-630-EUT. | Includes the C19HOP models plus ws2mqtt's explicit ST-630-DE(P) wire-model mapping (`7C04`). The HT-630-EUT remains identified by its reported device type until an explicit model ID is available. |
+| Model catalogue | Documents the FP2620W2, FP1720W2, WST-630, W2-SVP-630 and W2-CO-10X devices used by that project. | Also reports testing with the ST-630-DE(P) and HT-630-EUT, and stores model numbers in manufacturer numeric order such as `08ED`. | Includes the C19HOP models plus ST-630-DE(P). Internal constants and raw entities retain packet-byte order (`ED08`, `7C04`) for compatibility; FireAngel's gateway displays those numeric models as `08ED`, `047C`. The HT-630-EUT remains identified by its reported device type until an explicit model ID is available. |
 | Home Assistant model | Serial JSON plus user-maintained template sensors and commands. | MQTT discovery devices and gateway-level Home Assistant events. | ESPHome native bridge controls plus dynamically discovered per-detector MQTT entities, per-device alarm/test triggers and network-wide automation blueprints. `via_device` is intentionally omitted: the bridge belongs to ESPHome's native-API config entry while the detectors belong to MQTT, and linking across integrations would require a duplicate MQTT bridge device. |
 
-The main open protocol questions are therefore the disputed `71` battery/fault
-bits, the meaning of trailing SID/sequence bytes, and model IDs not yet seen in
-this project's captures. These should be resolved with timestamped raw frames
-and, where timing is involved, logic-analyser traces from real hardware.
+The main open protocol questions are therefore the meaning of `71` bits `40`
+and `80`, trailing SID/sequence bytes, and model IDs not yet seen in this
+project's captures. These should be resolved with timestamped raw frames and,
+where timing is involved, logic-analyser traces from real hardware.
 
 ## Tests
 

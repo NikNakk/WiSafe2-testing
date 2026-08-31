@@ -5,6 +5,14 @@
 
 namespace esphome::wisafe2 {
 
+// 0x71 status flags, named by captured FireAngel Connected Gateway firmware.
+static constexpr uint8_t STATUS_FLAG_CALIBRATED = 0x01;
+static constexpr uint8_t STATUS_FLAG_FAULTY = 0x02;
+static constexpr uint8_t STATUS_FLAG_ON_BASE = 0x04;
+static constexpr uint8_t STATUS_FLAG_SD_BATTERY_FAULT = 0x08;
+static constexpr uint8_t STATUS_FLAG_AC_FAILED = 0x10;
+static constexpr uint8_t STATUS_FLAG_RM_BATTERY_FAULT = 0x20;
+
 enum class DetectorType : uint8_t { UNKNOWN, SMOKE, HEAT, CARBON_MONOXIDE };
 
 enum class ManagementCommand : uint8_t {
@@ -37,11 +45,18 @@ struct DecodedPacket {
   bool has_battery;
   bool has_alarm;
   bool has_sid;
+  bool has_status_flags;
   bool alarm;
   bool base_problem;
   bool battery_low;
+  bool calibrated;
+  bool device_fault;
+  bool sensor_battery_fault;
+  bool ac_power_fault;
+  bool radio_battery_fault;
   uint8_t sid;
   uint8_t device_type;
+  uint8_t status_flags;
   char device[12];
   char model[12];
   char event[32];

@@ -8,6 +8,9 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Complete per-detector `71` status diagnostics for calibrated, generic fault,
+  on-base, detector-battery fault, AC failure and radio-module-battery fault,
+  together with the raw status byte for the two still-unnamed high bits.
 - Per-detector Home Assistant device triggers for alarm detected, alarm cleared,
   physical test passed and physical test failed events.
 - A per-detector `Network member` diagnostic entity derived from the latest SID
@@ -22,6 +25,11 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MQTT sends now use ESPHome's asynchronous ESP-IDF path, and radio events are
   processed in bounded main-loop batches. This prevents detector discovery and
   diagnostic publication from blocking other ESPHome components for seconds.
+
+### Fixed
+
+- Detector low-battery state now uses the manufacturer firmware's `08` and `20`
+  battery-fault bits instead of the unrelated `02` and `40` bits.
 
 ### Documentation
 

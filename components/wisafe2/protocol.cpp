@@ -245,9 +245,16 @@ bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded)
     decoded->has_event = true;
     decoded->has_base = true;
     decoded->has_battery = true;
+    decoded->has_status_flags = true;
     decoded->alarm = false;
-    decoded->base_problem = (packet[6] & 0x04) == 0;
-    decoded->battery_low = (packet[6] & 0x42) != 0;
+    decoded->status_flags = packet[6];
+    decoded->calibrated = (packet[6] & STATUS_FLAG_CALIBRATED) != 0;
+    decoded->device_fault = (packet[6] & STATUS_FLAG_FAULTY) != 0;
+    decoded->base_problem = (packet[6] & STATUS_FLAG_ON_BASE) == 0;
+    decoded->sensor_battery_fault = (packet[6] & STATUS_FLAG_SD_BATTERY_FAULT) != 0;
+    decoded->ac_power_fault = (packet[6] & STATUS_FLAG_AC_FAILED) != 0;
+    decoded->radio_battery_fault = (packet[6] & STATUS_FLAG_RM_BATTERY_FAULT) != 0;
+    decoded->battery_low = decoded->sensor_battery_fault || decoded->radio_battery_fault;
     snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[1], packet[2], packet[3]);
     snprintf(decoded->model, sizeof(decoded->model), "%02X%02X", packet[4], packet[5]);
     snprintf(decoded->event, sizeof(decoded->event), "STATUS");

@@ -1266,6 +1266,12 @@ void WiSafe2Component::load_inventory_() {
     this->detectors_[i].alarm = -1;
     this->detectors_[i].base_problem = -1;
     this->detectors_[i].battery_low = -1;
+    this->detectors_[i].calibrated = -1;
+    this->detectors_[i].device_fault = -1;
+    this->detectors_[i].sensor_battery_fault = -1;
+    this->detectors_[i].ac_power_fault = -1;
+    this->detectors_[i].radio_battery_fault = -1;
+    this->detectors_[i].status_flags = -1;
     this->detectors_[i].network_member = -1;
   }
   ESP_LOGI(TAG, "Restored %u detector(s) from flash", this->detector_count_);
@@ -1348,6 +1354,12 @@ WiSafe2Component::DetectorState *WiSafe2Component::find_or_create_detector_(cons
   detector->alarm = -1;
   detector->base_problem = -1;
   detector->battery_low = -1;
+  detector->calibrated = -1;
+  detector->device_fault = -1;
+  detector->sensor_battery_fault = -1;
+  detector->ac_power_fault = -1;
+  detector->radio_battery_fault = -1;
+  detector->status_flags = -1;
   detector->network_member = -1;
   ESP_LOGI(TAG, "Discovered new detector %06X (%u/%u)", static_cast<unsigned>(decoded.device_id),
            this->detector_count_, this->max_detectors_);
@@ -1385,6 +1397,14 @@ void WiSafe2Component::update_detector_(const DecodedPacket &decoded, const char
     detector->base_problem = decoded.base_problem ? 1 : 0;
   if (decoded.has_battery)
     detector->battery_low = decoded.battery_low ? 1 : 0;
+  if (decoded.has_status_flags) {
+    detector->calibrated = decoded.calibrated ? 1 : 0;
+    detector->device_fault = decoded.device_fault ? 1 : 0;
+    detector->sensor_battery_fault = decoded.sensor_battery_fault ? 1 : 0;
+    detector->ac_power_fault = decoded.ac_power_fault ? 1 : 0;
+    detector->radio_battery_fault = decoded.radio_battery_fault ? 1 : 0;
+    detector->status_flags = decoded.status_flags;
+  }
   if (decoded.has_event)
     snprintf(detector->event, sizeof(detector->event), "%s", decoded.event);
   if (decoded.has_result) {
@@ -1659,6 +1679,20 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
                                         "{{ value_json.battery_low }}", "battery", "diagnostic", nullptr);
   ok &= this->publish_discovery_entity_(detector, "binary_sensor", "base_problem", "Base",
                                         "{{ value_json.base_problem }}", "problem", "diagnostic", nullptr);
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "calibrated", "Calibrated",
+                                        "{{ value_json.calibrated }}", nullptr, "diagnostic",
+                                        "mdi:check-decagram-outline");
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "device_fault", "Device fault",
+                                        "{{ value_json.device_fault }}", "problem", "diagnostic", nullptr);
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "sensor_battery_fault",
+                                        "Detector battery fault", "{{ value_json.sensor_battery_fault }}",
+                                        "battery", "diagnostic", nullptr);
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "ac_power_fault", "AC power fault",
+                                        "{{ value_json.ac_power_fault }}", "problem", "diagnostic",
+                                        "mdi:power-plug-off-outline");
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "radio_battery_fault",
+                                        "Radio module battery fault", "{{ value_json.radio_battery_fault }}",
+                                        "battery", "diagnostic", nullptr);
   ok &= this->publish_discovery_entity_(detector, "binary_sensor", "network_member", "Network member",
                                         "{{ value_json.network_member }}", "connectivity", "diagnostic", nullptr);
   ok &= this->publish_discovery_entity_(detector, "sensor", "model", "Model", "{{ value_json.model }}", nullptr,
@@ -1681,6 +1715,9 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
   ok &= this->publish_discovery_entity_(detector, "sensor", "diagnostic_flags", "Diagnostic flags",
                                         "{{ value_json.diagnostic_flags }}", nullptr, "diagnostic",
                                         "mdi:flag-outline");
+  ok &= this->publish_discovery_entity_(detector, "sensor", "status_flags", "Status flags",
+                                        "{{ value_json.status_flags }}", nullptr, "diagnostic",
+                                        "mdi:flag-variant-outline");
   ok &= this->publish_discovery_entity_(detector, "sensor", "radio_fault_count", "Radio fault count",
                                         "{{ value_json.radio_fault_count }}", nullptr, "diagnostic",
                                         "mdi:alert-circle-check-outline", "measurement");
@@ -1724,6 +1761,22 @@ bool WiSafe2Component::publish_detector_state_(const DetectorState &detector) {
         else root["battery_low"] = nullptr;
         if (detector.base_problem >= 0) root["base_problem"] = detector.base_problem ? "ON" : "OFF";
         else root["base_problem"] = nullptr;
+        if (detector.calibrated >= 0) root["calibrated"] = detector.calibrated ? "ON" : "OFF";
+        else root["calibrated"] = nullptr;
+        if (detector.device_fault >= 0) root["device_fault"] = detector.device_fault ? "ON" : "OFF";
+        else root["device_fault"] = nullptr;
+        if (detector.sensor_battery_fault >= 0)
+          root["sensor_battery_fault"] = detector.sensor_battery_fault ? "ON" : "OFF";
+        else
+          root["sensor_battery_fault"] = nullptr;
+        if (detector.ac_power_fault >= 0) root["ac_power_fault"] = detector.ac_power_fault ? "ON" : "OFF";
+        else root["ac_power_fault"] = nullptr;
+        if (detector.radio_battery_fault >= 0)
+          root["radio_battery_fault"] = detector.radio_battery_fault ? "ON" : "OFF";
+        else
+          root["radio_battery_fault"] = nullptr;
+        if (detector.status_flags >= 0) root["status_flags"] = detector.status_flags;
+        else root["status_flags"] = nullptr;
         if (detector.network_member >= 0) root["network_member"] = detector.network_member ? "ON" : "OFF";
         else root["network_member"] = nullptr;
         root["model"] = model;

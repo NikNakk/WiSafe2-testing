@@ -159,6 +159,12 @@ class WiSafe2Component : public Component {
     int8_t alarm;
     int8_t base_problem;
     int8_t battery_low;
+    int8_t calibrated;
+    int8_t device_fault;
+    int8_t sensor_battery_fault;
+    int8_t ac_power_fault;
+    int8_t radio_battery_fault;
+    int16_t status_flags;
     int8_t network_member;
     bool has_remote_diagnostic;
     uint8_t battery_primary;
