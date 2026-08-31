@@ -225,6 +225,9 @@ class WiSafe2Component : public Component {
   void service_mqtt_();
   bool publish_detector_discovery_(const DetectorState &detector);
   bool publish_detector_state_(const DetectorState &detector);
+  bool publish_detector_trigger_discovery_(const DetectorState &detector, const char *key, const char *type,
+                                           const char *subtype, const char *payload);
+  bool publish_detector_event_(const DetectorState &detector, const char *payload);
   bool publish_discovery_entity_(const DetectorState &detector, const char *component, const char *key,
                                  const char *name, const char *value_template, const char *device_class,
                                  const char *entity_category, const char *icon);

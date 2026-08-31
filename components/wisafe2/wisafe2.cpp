@@ -1407,6 +1407,18 @@ void WiSafe2Component::update_detector_(const DecodedPacket &decoded, const char
       this->mqtt_resync_index_ = 0;
       this->mqtt_next_sync_ms_ = millis() + 5000;
     }
+
+    // Device-trigger events are deliberately non-retained and are emitted only
+    // for live radio traffic. Do not retry them after an MQTT failure: doing so
+    // could turn a stale alarm or test into a new Home Assistant automation.
+    const char *event_payload = nullptr;
+    if (decoded.has_alarm)
+      event_payload = decoded.alarm ? "alarm_on" : "alarm_off";
+    else if (decoded.has_result)
+      event_payload = strcmp(decoded.result, "PASS") == 0 ? "test_pass" : "test_fail";
+    if (event_payload != nullptr && !this->publish_detector_event_(*detector, event_payload))
+      ESP_LOGW(TAG, "Failed to publish live event %s for detector %06X", event_payload,
+               static_cast<unsigned>(detector->device_id));
   }
 }
 
@@ -1580,6 +1592,50 @@ bool WiSafe2Component::publish_discovery_entity_(const DetectorState &detector, 
       0, true);
 }
 
+bool WiSafe2Component::publish_detector_trigger_discovery_(const DetectorState &detector, const char *key,
+                                                           const char *type, const char *subtype,
+                                                           const char *payload) {
+  char discovery_topic[192];
+  char event_topic[128];
+  char trigger_id[96];
+  char device_identifier[80];
+  char detector_name[40];
+  snprintf(trigger_id, sizeof(trigger_id), "wisafe2_%s_%06x_%s", App.get_name().c_str(),
+           static_cast<unsigned>(detector.device_id), key);
+  snprintf(device_identifier, sizeof(device_identifier), "wisafe2_%s_%06x", App.get_name().c_str(),
+           static_cast<unsigned>(detector.device_id));
+  snprintf(detector_name, sizeof(detector_name), "FireAngel %06X", static_cast<unsigned>(detector.device_id));
+  snprintf(discovery_topic, sizeof(discovery_topic), "%s/device_automation/%s/config",
+           this->discovery_prefix_.c_str(), trigger_id);
+  this->format_detector_topic_(event_topic, sizeof(event_topic), detector, "event");
+
+  return mqtt::global_mqtt_client->publish_json(
+      discovery_topic,
+      [&](JsonObject root) {
+        root["automation_type"] = "trigger";
+        root["type"] = type;
+        root["subtype"] = subtype;
+        root["topic"] = event_topic;
+        root["payload"] = payload;
+        JsonObject device = root["device"].to<JsonObject>();
+        JsonArray identifiers = device["identifiers"].to<JsonArray>();
+        identifiers.add(device_identifier);
+        device["name"] = detector_name;
+        device["manufacturer"] = "FireAngel";
+        device["model"] = this->model_name_(detector);
+        JsonObject origin = root["origin"].to<JsonObject>();
+        origin["name"] = "WiSafe2 ESPHome bridge";
+        origin["sw_version"] = ESPHOME_VERSION;
+      },
+      0, true);
+}
+
+bool WiSafe2Component::publish_detector_event_(const DetectorState &detector, const char *payload) {
+  char topic[128];
+  this->format_detector_topic_(topic, sizeof(topic), detector, "event");
+  return mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, false);
+}
+
 bool WiSafe2Component::format_last_test_(const DetectorState &detector, char *buffer, size_t length) const {
   if (detector.last_test_epoch == 0 || buffer == nullptr || length == 0)
     return false;
@@ -1629,6 +1685,10 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
                                         "mdi:clock-check-outline");
   ok &= this->publish_discovery_entity_(detector, "sensor", "raw_frame", "Last raw frame",
                                         "{{ value_json.raw_frame }}", nullptr, "diagnostic", "mdi:code-tags");
+  ok &= this->publish_detector_trigger_discovery_(detector, "alarm_detected", "alarm", "detected", "alarm_on");
+  ok &= this->publish_detector_trigger_discovery_(detector, "alarm_cleared", "alarm", "cleared", "alarm_off");
+  ok &= this->publish_detector_trigger_discovery_(detector, "test_passed", "test", "passed", "test_pass");
+  ok &= this->publish_detector_trigger_discovery_(detector, "test_failed", "test", "failed", "test_fail");
   return ok;
 }
 

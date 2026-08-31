@@ -8,10 +8,18 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Per-detector Home Assistant device triggers for alarm detected, alarm cleared,
+  physical test passed and physical test failed events.
 - A per-detector `Network member` diagnostic entity derived from the latest SID
   map, so stale retained inventory is visible without automatically deleting
   Home Assistant devices after a radio reset or temporary topology change.
 - The ST-630-DE smoke detector model mapping (`7C04`) documented by ws2mqtt.
+
+### Documentation
+
+- Clarified why remote diagnostic battery bytes and flags cannot safely be used
+  to infer the detector's low-battery or on-base state, and why MQTT detector
+  devices do not declare an ESPHome-native bridge as `via_device`.
 
 ## [0.5.0] - 2026-08-31
 

@@ -95,7 +95,10 @@ last-test result, last-test timestamp, raw-frame and remote-radio diagnostic
 entities, including whether each retained detector is present in the latest
 network SID map. The bridge walks the radio's SID map to identify paired
 detectors and also reacts immediately when the radio announces a newly paired
-SID. Alarm
+SID. Each detector also exposes Home Assistant device triggers for alarm
+detected, alarm cleared, physical test passed and physical test failed. These
+events are not retained, so reconnecting Home Assistant or the broker cannot
+replay an old alarm or test as a new trigger. Alarm
 state remains unknown until live alarm-on (`50`) or alarm-off (`51`) traffic is
 received because the diagnostic query cannot report an alarm already in
 progress. The optional `refresh_detectors` button queries diagnostic state from
@@ -106,6 +109,14 @@ only the bridge diagnostic and SID map are polled every 60 seconds. Unused
 detector capacity is not advertised. The default inventory
 limit is 16 and can be changed with `max_detectors` up to 32.
 Discovery and state are republished after an MQTT reconnect.
+
+Remote diagnostics expose the two battery readings and diagnostic flags exactly
+as raw values. They do not contain an established on-base field, and neither
+reference implementation documents reliable thresholds that turn the battery
+bytes into an OK/low state. Consequently, `Base` and `Battery` remain unknown
+until a live `71` status packet supplies those states. Treating zero diagnostic
+flags as proof that both states are OK would hide genuine faults if the flags
+have a different meaning on another detector model.
 
 The YAML deliberately sets ESPHome's ordinary MQTT entity discovery to false:
 the bridge diagnostics arrive through the native API, while only the dynamic
@@ -219,6 +230,11 @@ timestamp.
 
 ### Notification blueprints
 
+The same live alarm and physical-test traffic is also available through each
+detector's device triggers in Home Assistant's automation editor. The blueprints
+below remain useful when one automation should automatically include every
+current and future FireAngel detector.
+
 #### Real alarm notifications
 
 The repository includes a Home Assistant automation blueprint for notifying on
@@ -315,7 +331,7 @@ explicit below rather than treating either interpretation as authoritative.
 | Trailing packet fields | Unknown trailing bytes are generally passed through or ignored. | Some receive structures label trailing bytes as SID and sequence metadata. | Accepts extended frames but reads only independently established offsets. The possible SID/sequence fields remain undecoded until captures confirm their meaning across packet types. |
 | Command pacing | Timing follows the Nano firmware's blocking SPI/IRQ flow. | Enforces a minimum interval of approximately 500 ms between transmissions. | Enforces a 500 ms quiet interval after transmitted and received frames before issuing another command. This also accommodates asynchronous `C4` identity and `D4 06` status replies observed on real hardware. |
 | Model catalogue | Documents the FP2620W2, FP1720W2, WST-630, W2-SVP-630 and W2-CO-10X devices used by that project. | Also reports testing with the ST-630-DE(P) and HT-630-EUT. | Includes the C19HOP models plus ws2mqtt's explicit ST-630-DE(P) wire-model mapping (`7C04`). The HT-630-EUT remains identified by its reported device type until an explicit model ID is available. |
-| Home Assistant model | Serial JSON plus user-maintained template sensors and commands. | MQTT discovery devices and gateway-level Home Assistant events. | ESPHome native bridge controls plus dynamically discovered per-detector MQTT entities and separate alarm/test automation blueprints. |
+| Home Assistant model | Serial JSON plus user-maintained template sensors and commands. | MQTT discovery devices and gateway-level Home Assistant events. | ESPHome native bridge controls plus dynamically discovered per-detector MQTT entities, per-device alarm/test triggers and network-wide automation blueprints. `via_device` is intentionally omitted: the bridge belongs to ESPHome's native-API config entry while the detectors belong to MQTT, and linking across integrations would require a duplicate MQTT bridge device. |
 
 The main open protocol questions are therefore the disputed `71` battery/fault
 bits, the meaning of trailing SID/sequence bytes, and model IDs not yet seen in
