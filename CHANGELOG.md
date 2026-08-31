@@ -6,6 +6,40 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-31
+
+### Added
+
+- Active detector discovery from the radio SID map, including `C4` remote
+  identity decoding and per-detector `D4 06` diagnostic polling.
+- Immediate discovery of newly paired detectors announced with `D4 09`, plus
+  raw battery, RSSI, firmware, diagnostic-flag, and radio-fault entities.
+- An on-demand `Refresh Detector Diagnostics` button that queries every known
+  detector without enabling periodic per-detector polling.
+
+### Fixed
+
+- Treat `46 7E` as acceptance of remote identity requests, wait for their `C4`
+  identity frames asynchronously, and enforce a 500 ms quiet interval between
+  radio frames before issuing another command. This prevents SID discovery and
+  remote diagnostic requests from being sent faster than the donor radio can
+  process them.
+- Serialize remote identity and diagnostic work so only one request awaits its
+  asynchronous response at a time, and defer local polling while it is
+  outstanding. This prevents delayed `D4 06` responses colliding with later
+  commands and losing their leading `D4` byte.
+- Ignore `D4 09` announcements when the SID and device ID already match the
+  stored inventory instead of unnecessarily repeating identity discovery.
+- Reconcile the SID map before a manual detector refresh, avoiding a misleading
+  `NO DETECTORS` result merely because discovery had not yet run after startup.
+- Apply WiSafe2 reserved-byte stuffing on every SPI transmit and receive path:
+  payload `7E` and `7D` bytes are now encoded as `7D 01` and `7D 02`, while the
+  final `7E` frame delimiter remains unescaped.
+- Decode `51` alarm-off events so remote alarm entities clear when the radio
+  reports that an interlinked alarm has ended.
+- Only explicit alarm-on and alarm-off events now change alarm state; routine
+  test, status, and diagnostic traffic no longer clears an active alarm.
+
 ## [0.4.0] - 2026-08-29
 
 ### Added

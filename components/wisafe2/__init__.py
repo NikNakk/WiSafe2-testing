@@ -36,6 +36,7 @@ CONF_SILENCE_CO = "silence_co"
 CONF_SILENCE_FIRE = "silence_fire"
 CONF_CHECK_PAIRING = "check_pairing"
 CONF_START_PAIRING = "start_pairing"
+CONF_REFRESH_DETECTORS = "refresh_detectors"
 CONF_DISCOVERY_PREFIX = "discovery_prefix"
 CONF_MAX_DETECTORS = "max_detectors"
 CONF_BRIDGE_DEVICE_ID = "bridge_device_id"
@@ -159,6 +160,11 @@ CONFIG_SCHEMA = cv.All(
                 icon="mdi:access-point-plus",
                 entity_category=ENTITY_CATEGORY_CONFIG,
             ),
+            cv.Optional(CONF_REFRESH_DETECTORS): button.button_schema(
+                WiSafe2CommandButton,
+                icon="mdi:refresh",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on_esp32,
@@ -225,6 +231,7 @@ async def to_code(config):
         (CONF_SILENCE_FIRE, ManagementCommand.SILENCE_FIRE),
         (CONF_CHECK_PAIRING, ManagementCommand.QUERY_PAIRING),
         (CONF_START_PAIRING, ManagementCommand.START_PAIRING),
+        (CONF_REFRESH_DETECTORS, ManagementCommand.REFRESH_DETECTORS),
     ):
         if button_config := config.get(key):
             command_button = await button.new_button(button_config)

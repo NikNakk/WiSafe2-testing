@@ -3,7 +3,7 @@ esphome:
   friendly_name: WiSafe2 Bridge
   project:
     name: nickkennedy.wisafe2_bridge
-    version: "0.4.0"
+    version: "0.5.0"
 
 esp32:
   board: m5stack-atoms3
@@ -97,5 +97,7 @@ wisafe2:
     name: "Silence Fire Alarms"
   check_pairing:
     name: "Check Network Pairing"
+  refresh_detectors:
+    name: "Refresh Detector Diagnostics"
   start_pairing:
     name: "Start Network Pairing"

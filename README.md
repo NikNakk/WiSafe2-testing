@@ -91,8 +91,18 @@ the timing-sensitive SPI operations.
 Each newly heard detector ID is stored in flash and advertised with retained
 Home Assistant MQTT discovery messages. Home Assistant creates one device per
 detector, containing alarm, low-battery, base-problem, model, last-event,
-last-test result, last-test timestamp and raw-frame entities. Unused detector
-capacity is not advertised. The default inventory limit is 16 and can be changed with `max_detectors` up to 32.
+last-test result, last-test timestamp, raw-frame and remote-radio diagnostic
+entities. The bridge walks the radio's SID map to identify paired detectors and
+also reacts immediately when the radio announces a newly paired SID. Alarm
+state remains unknown until live alarm-on (`50`) or alarm-off (`51`) traffic is
+received because the diagnostic query cannot report an alarm already in
+progress. The optional `refresh_detectors` button queries diagnostic state from
+all known detectors on demand, first reconciling the radio's current SID map.
+This remote diagnostic query is deliberately not scheduled periodically to
+avoid unnecessary radio traffic and battery use;
+only the bridge diagnostic and SID map are polled every 60 seconds. Unused
+detector capacity is not advertised. The default inventory
+limit is 16 and can be changed with `max_detectors` up to 32.
 Discovery and state are republished after an MQTT reconnect.
 
 The YAML deliberately sets ESPHome's ordinary MQTT entity discovery to false:
@@ -273,6 +283,9 @@ The component also polls the attached module's local diagnostic state and
 network SID map every 60 seconds, and responds whenever the radio requests the
 bridge identity with `41 7E`. These are local SPI management exchanges rather
 than periodic per-detector queries or synthetic alarm-network heartbeats.
+At the radio boundary, payload bytes `7E` and `7D` use WiSafe2 byte stuffing
+(`7D 01` and `7D 02` respectively); the terminal `7E` remains unescaped. Frames
+are restored to their logical bytes before decoding and diagnostic publishing.
 
 The sound-test buttons confirm only that the donor radio accepted and
 transmitted the request. WiSafe2 detectors do not return individual results for
@@ -280,13 +293,41 @@ a remotely initiated sound test. To exercise and record the self-test result of
 each detector, press that detector's physical test button. Emergency simulation
 is intentionally not exposed.
 
+## Comparison with the reference implementations
+
+This project draws on two independent, reverse-engineered implementations:
+[C19HOP/WiSafe2-to-HomeAssistant-Bridge](https://github.com/C19HOP/WiSafe2-to-HomeAssistant-Bridge)
+and [Tho85/ws2mqtt](https://github.com/Tho85/ws2mqtt). Neither is an official
+WiSafe2 protocol specification. Where they disagree, the difference is kept
+explicit below rather than treating either interpretation as authoritative.
+
+| Area | C19HOP bridge | ws2mqtt | This ESPHome component |
+|---|---|---|---|
+| Hardware and transport | Arduino Nano acting as the SPI slave, with a USB serial connection to Home Assistant. | Arduino/ATmega SPI-to-UART adapter plus a separate ESP32 MQTT gateway. | ESP32-S3 talks to the radio directly as an SPI slave and runs ESPHome, eliminating the intermediate microcontroller and serial protocol. |
+| Detector inventory | Detector IDs are learned from received traffic and configured manually in the supplied Home Assistant templates. | Maintains a device database, walks the `D4 03` SID map, resolves unknown SIDs with `D3 06 <sid> 01`, and reacts to `D4 09` join notifications. | Uses the ws2mqtt-style SID discovery flow, persists the resulting inventory, and creates detector devices using MQTT discovery. |
+| Remote diagnostics | Primarily derives detector state from unsolicited network traffic. | Supports `D3 06 <sid> 00` remote diagnostic requests, although its README recommends avoiding routine active queries to conserve detector batteries. | Queries a detector while discovering it and exposes an explicit **Refresh Detector Diagnostics** button. Remote requests are serialized and may take tens of seconds because the radio returns `C4`/`D4 06` asynchronously. It does not periodically poll individual detectors; only the attached radio and SID map are polled every 60 seconds. |
+| `71` status flags | The published analysis treats `04` as docked/on-base and `02` or `40` as low-battery indications. | The source names `02` as a generic fault, `04` as docked, `08` as detector-battery low, and `20` as radio-battery low. | Retains the C19HOP-compatible interpretation because it matches the captures and tests used for this project. The conflicting `08`/`20` interpretation remains unresolved and needs hardware captures before changing entities. |
+| Alarm state | Focuses on event reporting through serial/Home Assistant templates. | Handles live alarm-on and alarm-off traffic and deliberately starts alarm state as unknown because it cannot be queried. | Likewise changes alarm state only from live `50`/`51` events. Diagnostic polling never assumes that an alarm is off. |
+| Reserved-byte framing | The available SPI analysis does not describe a separate byte-stuffing layer. | Explicitly maps payload `7E` to `7D 01` and payload `7D` to `7D 02`. | Applies the ws2mqtt mapping on every SPI transmit and receive path while leaving the final `7E` delimiter unescaped. |
+| Inventory removal | Has no comparable persistent automatic database to reconcile. | Clears its device database when the attached radio reports the unpaired/reset SID state (`D2` SID `40`). | Deliberately retains previously discovered detectors. Automatic deletion is not implemented because a transient reset or radio replacement should not silently remove Home Assistant devices; a future manual reconciliation/reset control would be safer. |
+| Trailing packet fields | Unknown trailing bytes are generally passed through or ignored. | Some receive structures label trailing bytes as SID and sequence metadata. | Accepts extended frames but reads only independently established offsets. The possible SID/sequence fields remain undecoded until captures confirm their meaning across packet types. |
+| Command pacing | Timing follows the Nano firmware's blocking SPI/IRQ flow. | Enforces a minimum interval of approximately 500 ms between transmissions. | Enforces a 500 ms quiet interval after transmitted and received frames before issuing another command. This also accommodates asynchronous `C4` identity and `D4 06` status replies observed on real hardware. |
+| Model catalogue | Documents the FP2620W2, FP1720W2, WST-630, W2-SVP-630 and W2-CO-10X devices used by that project. | Also reports testing with the ST-630-DE(P) and HT-630-EUT. | Maps only model IDs confirmed by this project or the C19HOP captures. In particular, ws2mqtt's apparent ST-630-DE(P) `7C04` mapping is not yet enabled without a matching raw identity/status capture. |
+| Home Assistant model | Serial JSON plus user-maintained template sensors and commands. | MQTT discovery devices and gateway-level Home Assistant events. | ESPHome native bridge controls plus dynamically discovered per-detector MQTT entities and separate alarm/test automation blueprints. |
+
+The main open protocol questions are therefore the disputed `71` battery/fault
+bits, the meaning of trailing SID/sequence bytes, and model IDs not yet seen in
+this project's captures. These should be resolved with timestamped raw frames
+and, where timing is involved, logic-analyser traces from real hardware.
+
 ## Tests
 
 The radio packet decoder is platform-independent and has host-side coverage for
 the observed detector status frames, tests, emergencies, silence, attached-radio
 diagnostics, identity responses, battery/base flags, extended frames and
-malformed input. `D2` is treated as a diagnostic response from the attached
-radio rather than a missing-detector event. Known packet types use minimum
+malformed input, including reserved-byte escaping. `D2` is treated as a
+diagnostic response from the attached radio rather than a missing-detector
+event. Known packet types use minimum
 lengths because observed variants carry trailing fields that are not yet
 understood; decoding reads only the established fixed offsets and preserves the
 complete raw frame for diagnostics. Run the tests without an ESP32 toolchain:

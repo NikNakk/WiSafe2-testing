@@ -5,6 +5,64 @@
 
 namespace esphome::wisafe2 {
 
+bool escape_frame(const uint8_t *frame, size_t length, uint8_t *escaped, size_t capacity,
+                  size_t *escaped_length) {
+  if (frame == nullptr || escaped == nullptr || escaped_length == nullptr || length == 0 ||
+      frame[length - 1] != 0x7E)
+    return false;
+
+  size_t used = 0;
+  for (size_t i = 0; i + 1 < length; ++i) {
+    if (frame[i] == 0x7E || frame[i] == 0x7D) {
+      if (used + 2 > capacity)
+        return false;
+      escaped[used++] = 0x7D;
+      escaped[used++] = frame[i] == 0x7E ? 0x01 : 0x02;
+    } else {
+      if (used + 1 > capacity)
+        return false;
+      escaped[used++] = frame[i];
+    }
+  }
+  if (used + 1 > capacity)
+    return false;
+  escaped[used++] = 0x7E;
+  *escaped_length = used;
+  return true;
+}
+
+bool unescape_frame(const uint8_t *frame, size_t length, uint8_t *unescaped, size_t capacity,
+                    size_t *unescaped_length) {
+  if (frame == nullptr || unescaped == nullptr || unescaped_length == nullptr || length == 0 ||
+      frame[length - 1] != 0x7E)
+    return false;
+
+  size_t used = 0;
+  for (size_t i = 0; i + 1 < length; ++i) {
+    uint8_t value = frame[i];
+    if (value == 0x7E)
+      return false;
+    if (value == 0x7D) {
+      if (++i + 1 >= length)
+        return false;
+      if (frame[i] == 0x01)
+        value = 0x7E;
+      else if (frame[i] == 0x02)
+        value = 0x7D;
+      else
+        return false;
+    }
+    if (used + 1 > capacity)
+      return false;
+    unescaped[used++] = value;
+  }
+  if (used + 1 > capacity)
+    return false;
+  unescaped[used++] = 0x7E;
+  *unescaped_length = used;
+  return true;
+}
+
 const char *detector_model_name(uint16_t model_id, bool has_model) {
   if (!has_model)
     return "Unknown FireAngel alarm";
@@ -79,6 +137,7 @@ const char *management_command_name(ManagementCommand command) {
     case ManagementCommand::SILENCE_FIRE: return "Silence fire alarms";
     case ManagementCommand::QUERY_PAIRING: return "Check pairing";
     case ManagementCommand::START_PAIRING: return "Start pairing";
+    case ManagementCommand::REFRESH_DETECTORS: return "Refresh detector diagnostics";
   }
   return "Unknown command";
 }
@@ -197,6 +256,7 @@ bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded)
                          packet[3];
     decoded->has_event = true;
     decoded->has_base = true;
+    decoded->has_alarm = true;
     decoded->alarm = true;
     decoded->base_problem = false;
     snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[1], packet[2], packet[3]);
@@ -207,6 +267,19 @@ bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded)
     else
       snprintf(decoded->event, sizeof(decoded->event), "UNKNOWN EMERGENCY 0x%02X", packet[4]);
     snprintf(decoded->base, sizeof(decoded->base), "ON");
+  } else if (packet[0] == 0x51 && length >= 8) {
+    decoded->device_id = (static_cast<uint32_t>(packet[1]) << 16) | (static_cast<uint32_t>(packet[2]) << 8) |
+                         packet[3];
+    decoded->has_event = true;
+    decoded->has_alarm = true;
+    decoded->alarm = false;
+    snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[1], packet[2], packet[3]);
+    if (packet[4] == 0x81 || packet[4] == 0x82)
+      snprintf(decoded->event, sizeof(decoded->event), "FIRE ALARM CLEARED");
+    else if (packet[4] == 0x41)
+      snprintf(decoded->event, sizeof(decoded->event), "CARBON MONOXIDE ALARM CLEARED");
+    else
+      snprintf(decoded->event, sizeof(decoded->event), "ALARM CLEARED 0x%02X", packet[4]);
   } else if (packet[0] == 0x61 && length >= 7) {
     decoded->device_id = (static_cast<uint32_t>(packet[1]) << 16) | (static_cast<uint32_t>(packet[2]) << 8) |
                          packet[3];
@@ -217,6 +290,18 @@ bool decode_packet(const uint8_t *packet, size_t length, DecodedPacket *decoded)
     snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[1], packet[2], packet[3]);
     snprintf(decoded->event, sizeof(decoded->event), "SILENCE");
     snprintf(decoded->base, sizeof(decoded->base), "ON");
+  } else if (packet[0] == 0xC4 && length >= 10 && packet[7] < 64) {
+    decoded->device_id = (static_cast<uint32_t>(packet[1]) << 16) | (static_cast<uint32_t>(packet[2]) << 8) |
+                         packet[3];
+    decoded->model_id = (static_cast<uint16_t>(packet[5]) << 8) | packet[6];
+    decoded->has_model = true;
+    decoded->has_device_type = true;
+    decoded->has_sid = true;
+    decoded->sid = packet[7];
+    decoded->device_type = packet[4];
+    snprintf(decoded->device, sizeof(decoded->device), "%02X%02X%02X", packet[1], packet[2], packet[3]);
+    snprintf(decoded->model, sizeof(decoded->model), "%02X%02X", packet[5], packet[6]);
+    snprintf(decoded->event, sizeof(decoded->event), "REMOTE IDENTITY");
   } else {
     return false;
   }
@@ -257,6 +342,47 @@ bool decode_sid_map(const uint8_t *packet, size_t length, uint64_t *sid_map) {
   *sid_map = 0;
   for (size_t i = 0; i < 8; ++i)
     *sid_map |= static_cast<uint64_t>(packet[i + 2]) << (i * 8);
+  return true;
+}
+
+bool decode_new_device(const uint8_t *packet, size_t length, uint8_t *sid, uint32_t *device_id) {
+  if (packet == nullptr || sid == nullptr || device_id == nullptr || length < 7 || packet[0] != 0xD4 ||
+      packet[1] != 0x09 || packet[length - 1] != 0x7E || packet[2] >= 64)
+    return false;
+
+  *sid = packet[2];
+  *device_id = (static_cast<uint32_t>(packet[3]) << 16) |
+               (static_cast<uint32_t>(packet[4]) << 8) | packet[5];
+  return true;
+}
+
+bool decode_remote_diagnostic(const uint8_t *packet, size_t length, RemoteDiagnostic *diagnostic) {
+  if (packet == nullptr || diagnostic == nullptr || length < 14 || packet[0] != 0xD4 || packet[1] != 0x06 ||
+      packet[length - 1] != 0x7E || packet[2] >= 64)
+    return false;
+
+  memset(diagnostic, 0, sizeof(*diagnostic));
+  diagnostic->sid = packet[2];
+  diagnostic->battery_primary = packet[3];
+  diagnostic->battery_radio = packet[4];
+  diagnostic->unknown_1 = packet[5];
+  diagnostic->rssi = packet[6];
+  diagnostic->firmware_version = packet[7];
+  diagnostic->device_id = (static_cast<uint32_t>(packet[8]) << 16) |
+                          (static_cast<uint32_t>(packet[9]) << 8) | packet[10];
+  diagnostic->flags = packet[11];
+  diagnostic->radio_fault_count = packet[12];
+  return true;
+}
+
+bool encode_remote_diagnostic_request(uint8_t sid, bool identity, uint8_t *frame, size_t capacity,
+                                      size_t *length) {
+  static constexpr size_t FRAME_LENGTH = 5;
+  if (frame == nullptr || length == nullptr || capacity < FRAME_LENGTH || sid >= 64)
+    return false;
+  const uint8_t request[FRAME_LENGTH] = {0xD3, 0x06, sid, static_cast<uint8_t>(identity ? 0x01 : 0x00), 0x7E};
+  memcpy(frame, request, sizeof(request));
+  *length = sizeof(request);
   return true;
 }
 

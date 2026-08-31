@@ -9,15 +9,21 @@ using esphome::wisafe2::CommandFrames;
 using esphome::wisafe2::DetectorType;
 using esphome::wisafe2::ManagementCommand;
 using esphome::wisafe2::RadioDiagnostic;
+using esphome::wisafe2::RemoteDiagnostic;
 using esphome::wisafe2::decode_packet;
+using esphome::wisafe2::decode_new_device;
 using esphome::wisafe2::decode_radio_diagnostic;
+using esphome::wisafe2::decode_remote_diagnostic;
 using esphome::wisafe2::decode_sid_map;
 using esphome::wisafe2::detector_model_name;
 using esphome::wisafe2::detector_type_for_model;
 using esphome::wisafe2::encode_identity_response;
 using esphome::wisafe2::encode_management_command;
+using esphome::wisafe2::encode_remote_diagnostic_request;
+using esphome::wisafe2::escape_frame;
 using esphome::wisafe2::is_identity_request;
 using esphome::wisafe2::management_command_name;
+using esphome::wisafe2::unescape_frame;
 
 namespace {
 
@@ -50,6 +56,49 @@ template<size_t N> void check_rejected(const uint8_t (&packet)[N]) {
 template<size_t N> void check_frame(const uint8_t *actual, size_t actual_length, const uint8_t (&expected)[N]) {
   CHECK(actual_length == N);
   CHECK(std::memcmp(actual, expected, N) == 0);
+}
+
+void test_frame_escaping() {
+  const uint8_t plain[] = {0xD3, 0x03, 0x7E};
+  uint8_t wire[32]{};
+  size_t wire_length = 0;
+  CHECK(escape_frame(plain, sizeof(plain), wire, sizeof(wire), &wire_length));
+  check_frame(wire, wire_length, plain);
+
+  const uint8_t logical[] = {0x71, 0x7D, 0x7E, 0x01, 0x7E};
+  const uint8_t expected_wire[] = {0x71, 0x7D, 0x02, 0x7D, 0x01, 0x01, 0x7E};
+  CHECK(escape_frame(logical, sizeof(logical), wire, sizeof(wire), &wire_length));
+  check_frame(wire, wire_length, expected_wire);
+
+  uint8_t round_trip[16]{};
+  size_t round_trip_length = 0;
+  CHECK(unescape_frame(wire, wire_length, round_trip, sizeof(round_trip), &round_trip_length));
+  check_frame(round_trip, round_trip_length, logical);
+
+  size_t ignored = 0;
+  CHECK(!escape_frame(logical, sizeof(logical), wire, sizeof(expected_wire) - 1, &ignored));
+  CHECK(!unescape_frame(expected_wire, sizeof(expected_wire), round_trip, sizeof(logical) - 1, &ignored));
+
+  const uint8_t bad_code[] = {0x71, 0x7D, 0x03, 0x7E};
+  CHECK(!unescape_frame(bad_code, sizeof(bad_code), round_trip, sizeof(round_trip), &ignored));
+  const uint8_t dangling_escape[] = {0x71, 0x7D, 0x7E};
+  CHECK(!unescape_frame(dangling_escape, sizeof(dangling_escape), round_trip, sizeof(round_trip), &ignored));
+  const uint8_t embedded_terminator[] = {0x71, 0x7E, 0x00, 0x7E};
+  CHECK(!unescape_frame(embedded_terminator, sizeof(embedded_terminator), round_trip, sizeof(round_trip), &ignored));
+  const uint8_t no_terminator[] = {0x71, 0x00};
+  CHECK(!escape_frame(no_terminator, sizeof(no_terminator), wire, sizeof(wire), &ignored));
+  CHECK(!unescape_frame(no_terminator, sizeof(no_terminator), round_trip, sizeof(round_trip), &ignored));
+
+  // Reserved bytes may occur inside a detector ID. Unescaping must restore the
+  // original offsets before the packet decoder sees the frame.
+  const uint8_t escaped_status[] = {0x71, 0x12, 0x7D, 0x01, 0x7D, 0x02,
+                                    0x11, 0x04, 0x05, 0x7E};
+  CHECK(unescape_frame(escaped_status, sizeof(escaped_status), round_trip, sizeof(round_trip),
+                       &round_trip_length));
+  DecodedPacket decoded{};
+  CHECK(decode_packet(round_trip, round_trip_length, &decoded));
+  CHECK(decoded.device_id == 0x127E7D);
+  CHECK(decoded.model_id == 0x1104);
 }
 
 void test_management_command_frames() {
@@ -97,6 +146,7 @@ void test_management_command_frames() {
   CHECK(!encode_management_command(ManagementCommand::SOUND_FIRE, 0x1000000, model, &frames));
   CHECK(!encode_management_command(ManagementCommand::SOUND_FIRE, device, model, nullptr));
   CHECK_STRING(management_command_name(ManagementCommand::SOUND_FIRE), "Sound fire test");
+  CHECK_STRING(management_command_name(ManagementCommand::REFRESH_DETECTORS), "Refresh detector diagnostics");
 }
 
 void test_radio_identity_frames() {
@@ -141,6 +191,50 @@ void test_sid_map() {
   CHECK(!decode_sid_map(unknown_subtype, sizeof(unknown_subtype), &sid_map));
 }
 
+void test_remote_discovery_frames() {
+  uint8_t request[5]{};
+  size_t request_length = 0;
+  CHECK(encode_remote_diagnostic_request(9, true, request, sizeof(request), &request_length));
+  const uint8_t identity_request[] = {0xD3, 0x06, 0x09, 0x01, 0x7E};
+  check_frame(request, request_length, identity_request);
+  CHECK(encode_remote_diagnostic_request(9, false, request, sizeof(request), &request_length));
+  const uint8_t status_request[] = {0xD3, 0x06, 0x09, 0x00, 0x7E};
+  check_frame(request, request_length, status_request);
+  CHECK(!encode_remote_diagnostic_request(64, true, request, sizeof(request), &request_length));
+
+  const uint8_t identity[] = {0xC4, 0x12, 0x34, 0x56, 0x81, 0x11, 0x03, 0x09, 0x01, 0x7E};
+  DecodedPacket decoded = decode(identity);
+  CHECK(decoded.device_id == 0x123456);
+  CHECK(decoded.model_id == 0x1103);
+  CHECK(decoded.has_model);
+  CHECK(decoded.has_device_type);
+  CHECK(decoded.device_type == 0x81);
+  CHECK(decoded.has_sid);
+  CHECK(decoded.sid == 9);
+  CHECK(!decoded.has_alarm);
+  CHECK_STRING(decoded.event, "REMOTE IDENTITY");
+
+  const uint8_t new_device[] = {0xD4, 0x09, 0x09, 0x12, 0x34, 0x56, 0x7E};
+  uint8_t sid = 0;
+  uint32_t device_id = 0;
+  CHECK(decode_new_device(new_device, sizeof(new_device), &sid, &device_id));
+  CHECK(sid == 9);
+  CHECK(device_id == 0x123456);
+
+  const uint8_t status[] = {0xD4, 0x06, 0x09, 0x2A, 0x38, 0x41, 0xA0,
+                            0xEF, 0x12, 0x34, 0x56, 0x05, 0x02, 0x7E};
+  RemoteDiagnostic diagnostic{};
+  CHECK(decode_remote_diagnostic(status, sizeof(status), &diagnostic));
+  CHECK(diagnostic.sid == 9);
+  CHECK(diagnostic.battery_primary == 0x2A);
+  CHECK(diagnostic.battery_radio == 0x38);
+  CHECK(diagnostic.rssi == 0xA0);
+  CHECK(diagnostic.firmware_version == 0xEF);
+  CHECK(diagnostic.device_id == 0x123456);
+  CHECK(diagnostic.flags == 0x05);
+  CHECK(diagnostic.radio_fault_count == 2);
+}
+
 void test_observed_status_packets() {
   const uint8_t off_base[] = {0x71, 0x68, 0x96, 0x1A, 0x11, 0x04, 0x01, 0x07, 0x05, 0x7E};
   DecodedPacket decoded = decode(off_base);
@@ -152,6 +246,7 @@ void test_observed_status_packets() {
   CHECK(decoded.has_model);
   CHECK(decoded.has_base);
   CHECK(decoded.has_battery);
+  CHECK(!decoded.has_alarm);
   CHECK(!decoded.alarm);
   CHECK(decoded.base_problem);
   CHECK(!decoded.battery_low);
@@ -189,6 +284,7 @@ void test_fire_test_pass() {
   CHECK_STRING(decoded.battery, "OK");
   CHECK(decoded.has_result);
   CHECK(decoded.has_battery);
+  CHECK(!decoded.has_alarm);
   CHECK(!decoded.alarm);
 }
 
@@ -218,12 +314,19 @@ void test_emergencies() {
   decoded = decode(unknown);
   CHECK(decoded.alarm);
   CHECK_STRING(decoded.event, "UNKNOWN EMERGENCY 0x99");
+
+  const uint8_t cleared[] = {0x51, 0x10, 0x20, 0x30, 0x81, 0x09, 0x01, 0x7E};
+  decoded = decode(cleared);
+  CHECK(decoded.has_alarm);
+  CHECK(!decoded.alarm);
+  CHECK_STRING(decoded.event, "FIRE ALARM CLEARED");
 }
 
 void test_silence() {
   const uint8_t silence[] = {0x61, 0xAA, 0xBB, 0xCC, 0x81, 0x00, 0x7E};
   DecodedPacket decoded = decode(silence);
   CHECK(decoded.device_id == 0xAABBCC);
+  CHECK(!decoded.has_alarm);
   CHECK(!decoded.alarm);
   CHECK_STRING(decoded.event, "SILENCE");
   CHECK_STRING(decoded.base, "ON");
@@ -321,6 +424,13 @@ void test_malformed_frames() {
   const uint8_t emergency_too_short[] = {0x50, 0x01, 0x02, 0x03, 0x81, 0x7E};
   check_rejected(emergency_too_short);
 
+  const uint8_t alarm_off_too_short[] = {0x51, 0x01, 0x02, 0x03, 0x81, 0x01, 0x7E};
+  check_rejected(alarm_off_too_short);
+
+  const uint8_t remote_identity_bad_sid[] = {0xC4, 0x01, 0x02, 0x03, 0x81,
+                                             0x11, 0x03, 0x40, 0x01, 0x7E};
+  check_rejected(remote_identity_bad_sid);
+
   const uint8_t silence_too_short[] = {0x61, 0x01, 0x02, 0x03, 0x81, 0x7E};
   check_rejected(silence_too_short);
 
@@ -340,9 +450,11 @@ void test_malformed_frames() {
 }  // namespace
 
 int main() {
+  test_frame_escaping();
   test_management_command_frames();
   test_radio_identity_frames();
   test_sid_map();
+  test_remote_discovery_frames();
   test_model_catalogue();
   test_extended_frames();
   test_observed_status_packets();

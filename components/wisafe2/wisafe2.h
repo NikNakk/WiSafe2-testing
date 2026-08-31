@@ -54,6 +54,9 @@ class WiSafe2Component : public Component {
 
  protected:
   static constexpr size_t PACKET_MAX = 64;
+  // Every logical payload byte can expand to a two-byte escape sequence. The
+  // terminating 0x7E remains unescaped, so twice the logical limit is ample.
+  static constexpr size_t WIRE_PACKET_MAX = PACKET_MAX * 2;
   // Capacity is 16 bits because this radio has occasionally clocked 9-10 bits
   // for one byte. The protocol still expects 8; trans_len records what occurred.
   static constexpr size_t SPI_SLOT_BITS = 16;
@@ -65,6 +68,8 @@ class WiSafe2Component : public Component {
   static constexpr uint32_t COMMAND_POLL_INTERVAL_MS = 100;
   static constexpr uint32_t COMMAND_RESPONSE_TIMEOUT_MS = 1000;
   static constexpr uint32_t COMMAND_RETRY_DELAY_MS = 500;
+  static constexpr uint32_t RADIO_COMMAND_GAP_MS = 500;
+  static constexpr uint32_t REMOTE_RESPONSE_TIMEOUT_MS = 20000;
   static constexpr unsigned COMMAND_MAX_ATTEMPTS = 6;
   static constexpr uint32_t PAIRING_WINDOW_MS = 21000;
   static constexpr uint32_t LOCAL_DIAGNOSTIC_INTERVAL_MS = 60000;
@@ -81,8 +86,9 @@ class WiSafe2Component : public Component {
   struct ExchangeResult {
     bool spi_reset;
     size_t tx_count;
-    size_t tx_bits[PACKET_MAX];
-    uint8_t simultaneous_rx[PACKET_MAX];
+    size_t tx_expected;
+    size_t tx_bits[WIRE_PACKET_MAX];
+    uint8_t simultaneous_rx[WIRE_PACKET_MAX];
     size_t response_len;
     uint8_t response[PACKET_MAX];
     size_t response_bits[PACKET_MAX];
@@ -92,12 +98,15 @@ class WiSafe2Component : public Component {
 
   enum class EventType : uint8_t { INITIALIZED, ERROR, PACKET, COMMAND_RESULT };
 
+  enum class RemoteRequestType : uint8_t { NONE, IDENTITY, STATUS };
+
   enum class CommandOutcome : uint8_t {
     ACCEPTED,
     TIMEOUT,
     PAIRED,
     UNPAIRED,
     ALREADY_PAIRED,
+    NO_DETECTORS,
     ERROR,
   };
 
@@ -112,8 +121,13 @@ class WiSafe2Component : public Component {
   struct StoredDetector {
     uint32_t device_id;
     uint16_t model_id;
-    uint8_t has_model;
-    uint8_t reserved;
+    // Bit 0 is has_model, bit 1 is has_device_type, and bits 2..3 encode
+    // 0x41 (1), 0x81 (2), or another device type (3). Old 0/1 values remain
+    // valid after this formerly boolean byte is upgraded to metadata.
+    uint8_t metadata;
+    // Zero means unknown; values 1..64 encode SIDs 0..63. This reuses the
+    // formerly reserved byte without invalidating existing inventories.
+    uint8_t sid_plus_one;
   };
 
   struct StoredInventory {
@@ -139,9 +153,19 @@ class WiSafe2Component : public Component {
     uint32_t device_id;
     uint16_t model_id;
     bool has_model;
+    bool has_device_type;
+    uint8_t device_type;
+    int8_t sid;
     int8_t alarm;
     int8_t base_problem;
     int8_t battery_low;
+    bool has_remote_diagnostic;
+    uint8_t battery_primary;
+    uint8_t battery_radio;
+    uint8_t rssi;
+    uint8_t firmware_version;
+    uint8_t diagnostic_flags;
+    uint8_t radio_fault_count;
     uint32_t last_test_epoch;
     char event[32];
     char result[12];
@@ -160,6 +184,12 @@ class WiSafe2Component : public Component {
   CommandOutcome start_pairing_();
   bool respond_to_identity_request_();
   void poll_local_radio_();
+  bool discover_sid_(uint8_t sid, bool *awaiting_response);
+  bool poll_remote_status_(uint8_t sid, bool *awaiting_response);
+  bool remote_request_ready_() const;
+  bool has_remote_work_() const;
+  void service_remote_requests_();
+  bool note_discovery_packet_(const uint8_t *packet, size_t length);
   void emit_exchange_packets_(const ExchangeResult *result);
   esp_err_t receive_window_(uint32_t window_ms);
 
@@ -172,6 +202,8 @@ class WiSafe2Component : public Component {
   esp_err_t queue_slot_(SpiSlot *slot, uint8_t tx_value);
   esp_err_t wait_for_slot_(SpiSlot *expected, TickType_t timeout);
   esp_err_t reset_spi_slave_();
+  void wait_for_radio_command_gap_();
+  void note_radio_frame_complete_();
   esp_err_t abort_exchange_(esp_err_t cause, ExchangeResult *result);
   esp_err_t exchange_packet_(const uint8_t *data, size_t length, ExchangeResult *result,
                              unsigned response_packets, uint32_t response_timeout_ms);
@@ -187,6 +219,7 @@ class WiSafe2Component : public Component {
   void save_test_history_();
   DetectorState *find_or_create_detector_(const DecodedPacket &decoded);
   void update_detector_(const DecodedPacket &decoded, const char *raw_frame);
+  void update_remote_diagnostic_(const RemoteDiagnostic &diagnostic, const char *raw_frame);
   void service_mqtt_();
   bool publish_detector_discovery_(const DetectorState &detector);
   bool publish_detector_state_(const DetectorState &detector);
@@ -225,6 +258,17 @@ class WiSafe2Component : public Component {
   time::RealTimeClock *time_{nullptr};
   DetectorState detectors_[MAX_DETECTORS]{};
   uint8_t detector_count_{0};
+  uint8_t own_sid_{0xFF};
+  uint64_t known_sid_map_{0};
+  uint64_t latest_sid_map_{0};
+  uint64_t pending_discovery_sid_map_{0};
+  uint64_t pending_status_sid_map_{0};
+  uint32_t sid_device_ids_[64]{};
+  RemoteRequestType remote_request_type_{RemoteRequestType::NONE};
+  uint8_t remote_request_sid_{0xFF};
+  TickType_t remote_request_started_tick_{0};
+  TickType_t last_radio_frame_tick_{0};
+  bool has_completed_radio_frame_{false};
   ESPPreferenceObject inventory_pref_{};
   ESPPreferenceObject test_history_pref_{};
   bool mqtt_was_connected_{false};
