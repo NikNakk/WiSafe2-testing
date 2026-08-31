@@ -159,6 +159,7 @@ class WiSafe2Component : public Component {
     int8_t alarm;
     int8_t base_problem;
     int8_t battery_low;
+    int8_t network_member;
     bool has_remote_diagnostic;
     uint8_t battery_primary;
     uint8_t battery_radio;
@@ -220,6 +221,7 @@ class WiSafe2Component : public Component {
   DetectorState *find_or_create_detector_(const DecodedPacket &decoded);
   void update_detector_(const DecodedPacket &decoded, const char *raw_frame);
   void update_remote_diagnostic_(const RemoteDiagnostic &diagnostic, const char *raw_frame);
+  void update_detector_membership_(uint64_t sid_map);
   void service_mqtt_();
   bool publish_detector_discovery_(const DetectorState &detector);
   bool publish_detector_state_(const DetectorState &detector);

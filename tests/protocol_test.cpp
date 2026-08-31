@@ -367,6 +367,7 @@ void test_model_catalogue() {
   CHECK_STRING(detector_model_name(0x1104), "FP1720W2");
   CHECK_STRING(detector_model_name(0x1103), "WST-630");
   CHECK_STRING(detector_model_name(0x340E), "WST-630N");
+  CHECK_STRING(detector_model_name(0x7C04), "ST-630-DE");
   CHECK_STRING(detector_model_name(0x7803), "W2-CO-10X");
   CHECK_STRING(detector_model_name(0xC304), "W2-SVP-630");
   CHECK_STRING(detector_model_name(0xFFFF), "Unknown FireAngel alarm");
@@ -375,6 +376,7 @@ void test_model_catalogue() {
   CHECK(detector_type_for_model(0xED08) == DetectorType::SMOKE);
   CHECK(detector_type_for_model(0x1103) == DetectorType::SMOKE);
   CHECK(detector_type_for_model(0x340E) == DetectorType::SMOKE);
+  CHECK(detector_type_for_model(0x7C04) == DetectorType::SMOKE);
   CHECK(detector_type_for_model(0x1104) == DetectorType::HEAT);
   CHECK(detector_type_for_model(0x7803) == DetectorType::CARBON_MONOXIDE);
   CHECK(detector_type_for_model(0xC304) == DetectorType::UNKNOWN);

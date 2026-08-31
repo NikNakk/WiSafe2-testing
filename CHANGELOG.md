@@ -6,6 +6,13 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A per-detector `Network member` diagnostic entity derived from the latest SID
+  map, so stale retained inventory is visible without automatically deleting
+  Home Assistant devices after a radio reset or temporary topology change.
+- The ST-630-DE smoke detector model mapping (`7C04`) documented by ws2mqtt.
+
 ## [0.5.0] - 2026-08-31
 
 ### Added

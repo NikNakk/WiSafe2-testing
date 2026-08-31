@@ -92,8 +92,10 @@ Each newly heard detector ID is stored in flash and advertised with retained
 Home Assistant MQTT discovery messages. Home Assistant creates one device per
 detector, containing alarm, low-battery, base-problem, model, last-event,
 last-test result, last-test timestamp, raw-frame and remote-radio diagnostic
-entities. The bridge walks the radio's SID map to identify paired detectors and
-also reacts immediately when the radio announces a newly paired SID. Alarm
+entities, including whether each retained detector is present in the latest
+network SID map. The bridge walks the radio's SID map to identify paired
+detectors and also reacts immediately when the radio announces a newly paired
+SID. Alarm
 state remains unknown until live alarm-on (`50`) or alarm-off (`51`) traffic is
 received because the diagnostic query cannot report an alarm already in
 progress. The optional `refresh_detectors` button queries diagnostic state from
@@ -309,10 +311,10 @@ explicit below rather than treating either interpretation as authoritative.
 | `71` status flags | The published analysis treats `04` as docked/on-base and `02` or `40` as low-battery indications. | The source names `02` as a generic fault, `04` as docked, `08` as detector-battery low, and `20` as radio-battery low. | Retains the C19HOP-compatible interpretation because it matches the captures and tests used for this project. The conflicting `08`/`20` interpretation remains unresolved and needs hardware captures before changing entities. |
 | Alarm state | Focuses on event reporting through serial/Home Assistant templates. | Handles live alarm-on and alarm-off traffic and deliberately starts alarm state as unknown because it cannot be queried. | Likewise changes alarm state only from live `50`/`51` events. Diagnostic polling never assumes that an alarm is off. |
 | Reserved-byte framing | The available SPI analysis does not describe a separate byte-stuffing layer. | Explicitly maps payload `7E` to `7D 01` and payload `7D` to `7D 02`. | Applies the ws2mqtt mapping on every SPI transmit and receive path while leaving the final `7E` delimiter unescaped. |
-| Inventory removal | Has no comparable persistent automatic database to reconcile. | Clears its device database when the attached radio reports the unpaired/reset SID state (`D2` SID `40`). | Deliberately retains previously discovered detectors. Automatic deletion is not implemented because a transient reset or radio replacement should not silently remove Home Assistant devices; a future manual reconciliation/reset control would be safer. |
+| Inventory removal | Has no comparable persistent automatic database to reconcile. | Clears its device database when the attached radio reports the unpaired/reset SID state (`D2` SID `40`). | Deliberately retains previously discovered detectors. A per-detector `Network member` diagnostic shows whether each retained entry is present in the latest SID map, avoiding silent Home Assistant device deletion after a transient reset or radio replacement. |
 | Trailing packet fields | Unknown trailing bytes are generally passed through or ignored. | Some receive structures label trailing bytes as SID and sequence metadata. | Accepts extended frames but reads only independently established offsets. The possible SID/sequence fields remain undecoded until captures confirm their meaning across packet types. |
 | Command pacing | Timing follows the Nano firmware's blocking SPI/IRQ flow. | Enforces a minimum interval of approximately 500 ms between transmissions. | Enforces a 500 ms quiet interval after transmitted and received frames before issuing another command. This also accommodates asynchronous `C4` identity and `D4 06` status replies observed on real hardware. |
-| Model catalogue | Documents the FP2620W2, FP1720W2, WST-630, W2-SVP-630 and W2-CO-10X devices used by that project. | Also reports testing with the ST-630-DE(P) and HT-630-EUT. | Maps only model IDs confirmed by this project or the C19HOP captures. In particular, ws2mqtt's apparent ST-630-DE(P) `7C04` mapping is not yet enabled without a matching raw identity/status capture. |
+| Model catalogue | Documents the FP2620W2, FP1720W2, WST-630, W2-SVP-630 and W2-CO-10X devices used by that project. | Also reports testing with the ST-630-DE(P) and HT-630-EUT. | Includes the C19HOP models plus ws2mqtt's explicit ST-630-DE(P) wire-model mapping (`7C04`). The HT-630-EUT remains identified by its reported device type until an explicit model ID is available. |
 | Home Assistant model | Serial JSON plus user-maintained template sensors and commands. | MQTT discovery devices and gateway-level Home Assistant events. | ESPHome native bridge controls plus dynamically discovered per-detector MQTT entities and separate alarm/test automation blueprints. |
 
 The main open protocol questions are therefore the disputed `71` battery/fault

@@ -71,6 +71,7 @@ const char *detector_model_name(uint16_t model_id, bool has_model) {
     case 0x1104: return "FP1720W2";
     case 0x1103: return "WST-630";
     case 0x340E: return "WST-630N";
+    case 0x7C04: return "ST-630-DE";
     case 0x7803: return "W2-CO-10X";
     case 0xC304: return "W2-SVP-630";
     default: return "Unknown FireAngel alarm";
@@ -83,7 +84,8 @@ DetectorType detector_type_for_model(uint16_t model_id, bool has_model) {
   switch (model_id) {
     case 0xED08:
     case 0x1103:
-    case 0x340E: return DetectorType::SMOKE;
+    case 0x340E:
+    case 0x7C04: return DetectorType::SMOKE;
     case 0x1104: return DetectorType::HEAT;
     case 0x7803: return DetectorType::CARBON_MONOXIDE;
     default: return DetectorType::UNKNOWN;

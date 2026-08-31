@@ -196,6 +196,7 @@ void WiSafe2Component::loop() {
             ESP_LOGI(TAG, "Radio SID map: 0x%016llX", static_cast<unsigned long long>(sid_map));
             if (this->paired_sensor_ != nullptr)
               this->paired_sensor_->publish_state(sid_map != 0);
+            this->update_detector_membership_(sid_map);
           } else {
             RemoteDiagnostic remote{};
             if (decode_remote_diagnostic(event.packet, event.length, &remote)) {
@@ -1259,6 +1260,7 @@ void WiSafe2Component::load_inventory_() {
     this->detectors_[i].alarm = -1;
     this->detectors_[i].base_problem = -1;
     this->detectors_[i].battery_low = -1;
+    this->detectors_[i].network_member = -1;
   }
   ESP_LOGI(TAG, "Restored %u detector(s) from flash", this->detector_count_);
 }
@@ -1340,6 +1342,7 @@ WiSafe2Component::DetectorState *WiSafe2Component::find_or_create_detector_(cons
   detector->alarm = -1;
   detector->base_problem = -1;
   detector->battery_low = -1;
+  detector->network_member = -1;
   ESP_LOGI(TAG, "Discovered new detector %06X (%u/%u)", static_cast<unsigned>(decoded.device_id),
            this->detector_count_, this->max_detectors_);
   this->save_inventory_();
@@ -1368,6 +1371,8 @@ void WiSafe2Component::update_detector_(const DecodedPacket &decoded, const char
     this->sid_device_ids_[decoded.sid] = decoded.device_id;
     inventory_changed = true;
   }
+  if (decoded.has_sid)
+    detector->network_member = 1;
   if (decoded.has_alarm)
     detector->alarm = decoded.alarm ? 1 : 0;
   if (decoded.has_base)
@@ -1417,6 +1422,7 @@ void WiSafe2Component::update_remote_diagnostic_(const RemoteDiagnostic &diagnos
   const bool first_update = detector->raw_frame[0] == '\0';
   const bool inventory_changed = detector->sid != static_cast<int8_t>(diagnostic.sid);
   detector->sid = static_cast<int8_t>(diagnostic.sid);
+  detector->network_member = 1;
   detector->has_remote_diagnostic = true;
   detector->battery_primary = diagnostic.battery_primary;
   detector->battery_radio = diagnostic.battery_radio;
@@ -1434,6 +1440,24 @@ void WiSafe2Component::update_remote_diagnostic_(const RemoteDiagnostic &diagnos
       published = this->publish_detector_discovery_(*detector);
     published &= this->publish_detector_state_(*detector);
     if (!published) {
+      this->mqtt_resync_pending_ = true;
+      this->mqtt_resync_index_ = 0;
+      this->mqtt_next_sync_ms_ = millis() + 5000;
+    }
+  }
+}
+
+void WiSafe2Component::update_detector_membership_(uint64_t sid_map) {
+  const bool mqtt_connected = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
+  for (uint8_t i = 0; i < this->detector_count_; ++i) {
+    DetectorState &detector = this->detectors_[i];
+    const int8_t membership = detector.sid >= 0 && detector.sid < 64
+                                  ? ((sid_map & (uint64_t{1} << detector.sid)) != 0 ? 1 : 0)
+                                  : -1;
+    if (detector.network_member == membership)
+      continue;
+    detector.network_member = membership;
+    if (mqtt_connected && !this->publish_detector_state_(detector)) {
       this->mqtt_resync_pending_ = true;
       this->mqtt_resync_index_ = 0;
       this->mqtt_next_sync_ms_ = millis() + 5000;
@@ -1571,6 +1595,8 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
                                         "{{ value_json.battery_low }}", "battery", "diagnostic", nullptr);
   ok &= this->publish_discovery_entity_(detector, "binary_sensor", "base_problem", "Base",
                                         "{{ value_json.base_problem }}", "problem", "diagnostic", nullptr);
+  ok &= this->publish_discovery_entity_(detector, "binary_sensor", "network_member", "Network member",
+                                        "{{ value_json.network_member }}", "connectivity", "diagnostic", nullptr);
   ok &= this->publish_discovery_entity_(detector, "sensor", "model", "Model", "{{ value_json.model }}", nullptr,
                                         "diagnostic", "mdi:smoke-detector-variant");
   ok &= this->publish_discovery_entity_(detector, "sensor", "device_type", "Device type",
@@ -1629,6 +1655,8 @@ bool WiSafe2Component::publish_detector_state_(const DetectorState &detector) {
         else root["battery_low"] = nullptr;
         if (detector.base_problem >= 0) root["base_problem"] = detector.base_problem ? "ON" : "OFF";
         else root["base_problem"] = nullptr;
+        if (detector.network_member >= 0) root["network_member"] = detector.network_member ? "ON" : "OFF";
+        else root["network_member"] = nullptr;
         root["model"] = model;
         root["model_name"] = this->model_name_(detector);
         root["device_type"] = detector.has_device_type ? device_type : nullptr;
