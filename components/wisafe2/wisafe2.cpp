@@ -1712,7 +1712,7 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
                                         "measurement");
   ok &= this->publish_discovery_entity_(detector, "sensor", "firmware", "Radio firmware",
                                         "{{ value_json.firmware }}", nullptr, "diagnostic", "mdi:chip");
-  ok &= this->publish_discovery_entity_(detector, "sensor", "diagnostic_flags", "Diagnostic flags",
+  ok &= this->publish_discovery_entity_(detector, "sensor", "diagnostic_flags", "Remote diagnostic flags",
                                         "{{ value_json.diagnostic_flags }}", nullptr, "diagnostic",
                                         "mdi:flag-outline");
   ok &= this->publish_discovery_entity_(detector, "sensor", "status_flags", "Status flags",

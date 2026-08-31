@@ -33,6 +33,8 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+- Renamed the ambiguous `Diagnostic flags` display name to `Remote diagnostic
+  flags` and documented which detector data is persisted across reboots.
 - Updated the dynamic Home Assistant dashboard example so tapping a detector
   opens its device page instead of the alarm entity's more-info dialog.
 - Clarified why remote diagnostic battery bytes and flags cannot safely be used

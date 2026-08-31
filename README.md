@@ -113,15 +113,27 @@ detector capacity is not advertised. The default inventory
 limit is 16 and can be changed with `max_detectors` up to 32.
 Discovery and state are republished after an MQTT reconnect.
 
-Remote diagnostics expose the two battery readings and diagnostic flags exactly
-as raw values. They do not contain an established on-base field, and neither
-reference implementation documents reliable thresholds that turn the battery
-bytes into an OK/low state. Consequently, `Base` and `Battery` remain unknown
-until a live `71` status packet supplies those states. Treating zero diagnostic
-flags as proof that both states are OK would hide genuine faults if the flags
-have a different meaning on another detector model. The two raw battery
-readings, raw RSSI and radio fault count are published as measurement sensors so
-Home Assistant records long-term statistics and can graph their history.
+Detector identity, model, type and SID are persisted in ESP flash, as are the
+last physical-test result and timestamp. Live alarm, base, fault, membership and
+remote-diagnostic values are not duplicated into flash: their MQTT state is
+already retained by the broker and their history belongs in Home Assistant's
+recorder. After a reboot, the component republishes discovery without
+immediately replacing the retained snapshot. As fresh SID-map or diagnostic
+traffic is published, fields not yet observed during that boot may become
+unknown rather than being presented as newly measured state. Network membership
+is refreshed from the SID map. This limits flash writes and makes the boundary
+between last-known and currently observed data explicit.
+
+Remote diagnostics expose the two battery readings and `Remote diagnostic
+flags` exactly as raw values. They do not contain an established on-base field,
+and neither reference implementation documents reliable thresholds that turn
+the battery bytes into an OK/low state. Consequently, `Base` and `Battery`
+remain unknown until a live `71` status packet supplies those states. Treating
+zero remote diagnostic flags as proof that both states are OK would hide genuine
+faults if the flags have a different meaning on another detector model. The two
+raw battery readings, raw RSSI and radio fault count are published as
+measurement sensors so Home Assistant records long-term statistics and can
+graph their history.
 
 The YAML deliberately sets ESPHome's ordinary MQTT entity discovery to false:
 the bridge diagnostics arrive through the native API, while only the dynamic
