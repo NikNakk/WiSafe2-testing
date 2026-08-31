@@ -1,6 +1,8 @@
 .esphome/
 /build/
 __pycache__/
+.DS_Store
+.history/
 secrets.yaml
 eim_config.toml
 sdkconfig
