@@ -17,6 +17,8 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Raw sensor/radio battery readings, radio RSSI and radio fault count now use
+  Home Assistant's `measurement` state class for graphs and long-term statistics.
 - MQTT sends now use ESPHome's asynchronous ESP-IDF path, and radio events are
   processed in bounded main-loop batches. This prevents detector discovery and
   diagnostic publication from blocking other ESPHome components for seconds.

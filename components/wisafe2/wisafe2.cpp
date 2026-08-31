@@ -1543,7 +1543,7 @@ const char *WiSafe2Component::alarm_device_class_(const DetectorState &detector)
 bool WiSafe2Component::publish_discovery_entity_(const DetectorState &detector, const char *component,
                                                  const char *key, const char *name, const char *value_template,
                                                  const char *device_class, const char *entity_category,
-                                                 const char *icon) {
+                                                 const char *icon, const char *state_class) {
   char discovery_topic[192];
   char state_topic[128];
   char unique_id[96];
@@ -1576,6 +1576,8 @@ bool WiSafe2Component::publish_discovery_entity_(const DetectorState &detector, 
           root["entity_category"] = entity_category;
         if (icon != nullptr)
           root["icon"] = icon;
+        if (state_class != nullptr)
+          root["state_class"] = state_class;
         if (strcmp(component, "binary_sensor") == 0) {
           root["payload_on"] = "ON";
           root["payload_off"] = "OFF";
@@ -1667,12 +1669,13 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
                                         "diagnostic", "mdi:identifier");
   ok &= this->publish_discovery_entity_(detector, "sensor", "battery_primary_raw", "Sensor battery reading",
                                         "{{ value_json.battery_primary_raw }}", nullptr, "diagnostic",
-                                        "mdi:battery-heart-variant");
+                                        "mdi:battery-heart-variant", "measurement");
   ok &= this->publish_discovery_entity_(detector, "sensor", "battery_radio_raw", "Radio battery reading",
                                         "{{ value_json.battery_radio_raw }}", nullptr, "diagnostic",
-                                        "mdi:battery-heart-variant");
+                                        "mdi:battery-heart-variant", "measurement");
   ok &= this->publish_discovery_entity_(detector, "sensor", "rssi_raw", "Radio RSSI reading",
-                                        "{{ value_json.rssi_raw }}", nullptr, "diagnostic", "mdi:signal");
+                                        "{{ value_json.rssi_raw }}", nullptr, "diagnostic", "mdi:signal",
+                                        "measurement");
   ok &= this->publish_discovery_entity_(detector, "sensor", "firmware", "Radio firmware",
                                         "{{ value_json.firmware }}", nullptr, "diagnostic", "mdi:chip");
   ok &= this->publish_discovery_entity_(detector, "sensor", "diagnostic_flags", "Diagnostic flags",
@@ -1680,7 +1683,7 @@ bool WiSafe2Component::publish_detector_discovery_(const DetectorState &detector
                                         "mdi:flag-outline");
   ok &= this->publish_discovery_entity_(detector, "sensor", "radio_fault_count", "Radio fault count",
                                         "{{ value_json.radio_fault_count }}", nullptr, "diagnostic",
-                                        "mdi:alert-circle-check-outline");
+                                        "mdi:alert-circle-check-outline", "measurement");
   ok &= this->publish_discovery_entity_(detector, "sensor", "last_event", "Last event",
                                         "{{ value_json.event }}", nullptr, nullptr, "mdi:message-alert-outline");
   ok &= this->publish_discovery_entity_(detector, "sensor", "test_result", "Last test result",

@@ -116,7 +116,9 @@ reference implementation documents reliable thresholds that turn the battery
 bytes into an OK/low state. Consequently, `Base` and `Battery` remain unknown
 until a live `71` status packet supplies those states. Treating zero diagnostic
 flags as proof that both states are OK would hide genuine faults if the flags
-have a different meaning on another detector model.
+have a different meaning on another detector model. The two raw battery
+readings, raw RSSI and radio fault count are published as measurement sensors so
+Home Assistant records long-term statistics and can graph their history.
 
 The YAML deliberately sets ESPHome's ordinary MQTT entity discovery to false:
 the bridge diagnostics arrive through the native API, while only the dynamic

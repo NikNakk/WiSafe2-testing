@@ -230,7 +230,8 @@ class WiSafe2Component : public Component {
   bool publish_detector_event_(const DetectorState &detector, const char *payload);
   bool publish_discovery_entity_(const DetectorState &detector, const char *component, const char *key,
                                  const char *name, const char *value_template, const char *device_class,
-                                 const char *entity_category, const char *icon);
+                                 const char *entity_category, const char *icon,
+                                 const char *state_class = nullptr);
   const char *model_name_(const DetectorState &detector) const;
   const char *alarm_device_class_(const DetectorState &detector) const;
   bool format_last_test_(const DetectorState &detector, char *buffer, size_t length) const;
