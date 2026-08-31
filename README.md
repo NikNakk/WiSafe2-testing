@@ -148,94 +148,85 @@ card:
   type: vertical-stack
 card_param: cards
 filter:
-  include:
-    - domain: binary_sensor
-      device_manufacturer: FireAngel
-      attributes:
-        device_class: "/^(smoke|heat|carbon_monoxide)$/"
-      options:
-        type: custom:mushroom-template-card
-        entity: this.entity_id
-        primary: >-
-          {% set dev = device_id(config.entity) %}
-          {{ device_attr(dev, 'name_by_user') or device_attr(dev, 'name') }}
-        secondary: >-
-          {% set dev = device_id(config.entity) %}
-          {% set ns = namespace(
-            battery_low=false,
-            problem=false,
-            test_result='unknown',
-            last_test='unknown'
-          ) %}
-
-          {% for e in device_entities(dev) %}
-            {% if state_attr(e, 'device_class') == 'battery'
+  template: >-
+    {% set cards = namespace(items=[]) %}
+    {% set alarm_classes = ['smoke', 'heat', 'carbon_monoxide'] %}
+    {% for alarm in states.binary_sensor %}
+      {% set dev = device_id(alarm.entity_id) %}
+      {% if dev
+            and device_attr(dev, 'manufacturer') == 'FireAngel'
+            and alarm.attributes.device_class in alarm_classes %}
+        {% set ns = namespace(
+          battery_low=false,
+          problem=false,
+          test_result='unknown',
+          last_test='unknown'
+        ) %}
+        {% for e in device_entities(dev) %}
+          {% if state_attr(e, 'device_class') == 'battery'
+                and is_state(e, 'on') %}
+            {% set ns.battery_low = true %}
+          {% elif state_attr(e, 'device_class') == 'problem'
                   and is_state(e, 'on') %}
-              {% set ns.battery_low = true %}
-            {% elif state_attr(e, 'device_class') == 'problem'
-                    and is_state(e, 'on') %}
-              {% set ns.problem = true %}
-            {% elif e.endswith('_test_result') %}
-              {% set ns.test_result = states(e) %}
-            {% elif state_attr(e, 'device_class') == 'timestamp' %}
-              {% set ns.last_test = states(e) %}
-            {% endif %}
-          {% endfor %}
-
-          {% if is_state(config.entity, 'on') %}
-            ALARM
-          {% elif ns.battery_low %}
-            Battery low
-          {% elif ns.problem %}
-            Detector problem
-          {% else %}
-            Normal
+            {% set ns.problem = true %}
+          {% elif e.endswith('_test_result') %}
+            {% set ns.test_result = states(e) %}
+          {% elif state_attr(e, 'device_class') == 'timestamp' %}
+            {% set ns.last_test = states(e) %}
           {% endif %}
-          {% if ns.last_test not in ['unknown', 'unavailable', 'none', ''] %}
-            · Last test {{ as_timestamp(ns.last_test)
-              | timestamp_custom('%d %b %Y %H:%M', true) }}
-            {% if ns.test_result not in ['unknown', 'unavailable', 'none', ''] %}
-              ({{ ns.test_result }})
-            {% endif %}
-          {% else %}
-            · No test recorded
+        {% endfor %}
+        {% if is_state(alarm.entity_id, 'on') %}
+          {% set status = 'ALARM' %}
+          {% set color = 'red' %}
+        {% elif ns.battery_low %}
+          {% set status = 'Battery low' %}
+          {% set color = 'amber' %}
+        {% elif ns.problem %}
+          {% set status = 'Detector problem' %}
+          {% set color = 'amber' %}
+        {% else %}
+          {% set status = 'Normal' %}
+          {% set color = 'green' %}
+        {% endif %}
+        {% if ns.last_test not in ['unknown', 'unavailable', 'none', ''] %}
+          {% set tested = as_timestamp(ns.last_test)
+            | timestamp_custom('%d %b %Y %H:%M', true) %}
+          {% set secondary = status ~ ' · Last test ' ~ tested %}
+          {% if ns.test_result not in ['unknown', 'unavailable', 'none', ''] %}
+            {% set secondary = secondary ~ ' (' ~ ns.test_result ~ ')' %}
           {% endif %}
-        icon: |-
-          {% if is_state(config.entity, 'on') %}
-            mdi:fire-alert
-          {% else %}
-            mdi:smoke-detector
-          {% endif %}
-        color: >-
-          {% set dev = device_id(config.entity) %}
-          {% set ns = namespace(battery=false, problem=false) %}
-
-          {% for e in device_entities(dev) %}
-            {% if state_attr(e, 'device_class') == 'battery'
-                  and is_state(e, 'on') %}
-              {% set ns.battery = true %}
-            {% elif state_attr(e, 'device_class') == 'problem'
-                    and is_state(e, 'on') %}
-              {% set ns.problem = true %}
-            {% endif %}
-          {% endfor %}
-
-          {% if is_state(config.entity, 'on') %}
-            red
-          {% elif ns.battery or ns.problem %}
-            amber
-          {% else %}
-            green
-          {% endif %}
+        {% else %}
+          {% set secondary = status ~ ' · No test recorded' %}
+        {% endif %}
+        {% set card = {
+          'type': 'custom:mushroom-template-card',
+          'entity': alarm.entity_id,
+          'primary': device_attr(dev, 'name_by_user')
+            or device_attr(dev, 'name'),
+          'secondary': secondary,
+          'icon': 'mdi:fire-alert' if is_state(alarm.entity_id, 'on')
+            else 'mdi:smoke-detector',
+          'color': color,
+          'tap_action': {
+            'action': 'navigate',
+            'navigation_path': '/config/devices/device/' ~ dev
+          }
+        } %}
+        {% set cards.items = cards.items + [card] %}
+      {% endif %}
+    {% endfor %}
+    {{ cards.items | to_json }}
 sort:
   method: name
 ```
 
-The filter uses the manufacturer and alarm device-class metadata published by
+The template uses the manufacturer and alarm device-class metadata published by
 the component, so it does not depend on the ESPHome node name or generated
-entity IDs. The last test result and UTC timestamp are retained by the firmware
-and restored from flash after a reboot. The dashboard formats the timestamp in
-Home Assistant's local timezone. A physical test received before SNTP has
+entity IDs. It resolves each Home Assistant device-registry ID while generating
+the cards, allowing a tap to navigate directly to that detector's device page.
+The last test result and UTC timestamp are retained by the firmware and restored
+from flash after a reboot. The dashboard formats the timestamp in Home
+Assistant's local timezone. A physical test received before SNTP has
 synchronized still records its result, but cannot be assigned a reliable
 timestamp.
 
