@@ -24,6 +24,34 @@ static constexpr BaseType_t RADIO_TASK_CORE = 0;
 static constexpr BaseType_t RADIO_TASK_CORE = 1;
 #endif
 
+static TransportError transport_error_from_esp(esp_err_t error) {
+  switch (error) {
+    case ESP_OK: return TransportError::OK;
+    case ESP_ERR_INVALID_ARG: return TransportError::INVALID_ARGUMENT;
+    case ESP_ERR_TIMEOUT: return TransportError::TIMEOUT;
+    case ESP_ERR_INVALID_RESPONSE: return TransportError::INVALID_RESPONSE;
+    case ESP_ERR_NO_MEM: return TransportError::NO_MEMORY;
+    case ESP_ERR_INVALID_STATE: return TransportError::INVALID_STATE;
+    default: return TransportError::IO_ERROR;
+  }
+}
+
+static esp_err_t esp_error_from_transport(TransportError error) {
+  switch (error) {
+    case TransportError::OK: return ESP_OK;
+    case TransportError::INVALID_ARGUMENT: return ESP_ERR_INVALID_ARG;
+    case TransportError::TIMEOUT: return ESP_ERR_TIMEOUT;
+    case TransportError::INVALID_RESPONSE: return ESP_ERR_INVALID_RESPONSE;
+    case TransportError::NO_MEMORY: return ESP_ERR_NO_MEM;
+    case TransportError::INVALID_STATE: return ESP_ERR_INVALID_STATE;
+    case TransportError::IO_ERROR: return ESP_FAIL;
+  }
+  return ESP_FAIL;
+}
+
+WiSafe2Component::WiSafe2Component()
+    : radio_transport_(*this, BYTE_TIMEOUT_MS, RADIO_COMMAND_GAP_MS) {}
+
 void WiSafe2Component::set_pins(int sclk, int mosi, int miso, int cs, int irq) {
   this->sclk_pin_ = static_cast<gpio_num_t>(sclk);
   this->mosi_pin_ = static_cast<gpio_num_t>(mosi);
@@ -383,121 +411,58 @@ esp_err_t WiSafe2Component::reset_spi_slave_() {
   return spi_slave_queue_reset(SPI_HOST_USED);
 }
 
-void WiSafe2Component::wait_for_radio_command_gap_() {
-  if (!this->has_completed_radio_frame_)
-    return;
-  const TickType_t gap = pdMS_TO_TICKS(RADIO_COMMAND_GAP_MS);
-  const TickType_t elapsed = xTaskGetTickCount() - this->last_radio_frame_tick_;
-  if (elapsed < gap)
-    vTaskDelay(gap - elapsed);
-}
-
 void WiSafe2Component::note_radio_frame_complete_() {
-  this->last_radio_frame_tick_ = xTaskGetTickCount();
-  this->has_completed_radio_frame_ = true;
+  this->radio_transport_.note_frame_complete(this->transport_now_ticks());
 }
 
-esp_err_t WiSafe2Component::abort_exchange_(esp_err_t cause, ExchangeResult *result) {
-  esp_err_t reset_error = this->reset_spi_slave_();
-  result->spi_reset = reset_error == ESP_OK;
-  return reset_error == ESP_OK ? cause : reset_error;
+uint32_t WiSafe2Component::transport_now_ticks() const {
+  return static_cast<uint32_t>(xTaskGetTickCount());
 }
 
-esp_err_t WiSafe2Component::exchange_packet_(const uint8_t *data, size_t length, ExchangeResult *result,
-                                             unsigned response_packets, uint32_t response_timeout_ms) {
-  if (data == nullptr || result == nullptr || length == 0 || length > PACKET_MAX || response_packets == 0)
-    return ESP_ERR_INVALID_ARG;
+uint32_t WiSafe2Component::transport_ms_to_ticks(uint32_t milliseconds) const {
+  return static_cast<uint32_t>(pdMS_TO_TICKS(milliseconds));
+}
 
-  memset(result, 0, sizeof(*result));
-  uint8_t wire_data[WIRE_PACKET_MAX]{};
-  size_t wire_length = 0;
-  if (!escape_frame(data, length, wire_data, sizeof(wire_data), &wire_length))
-    return ESP_ERR_INVALID_ARG;
-  result->tx_expected = wire_length;
-  this->wait_for_radio_command_gap_();
-  SpiSlot tx_slot{};
-  SpiSlot rx_slots[2]{};
-  bool first_rx_queued = false;
+void WiSafe2Component::transport_delay_ticks(uint32_t ticks) {
+  vTaskDelay(static_cast<TickType_t>(ticks));
+}
 
-  for (size_t i = 0; i < wire_length; ++i) {
-    esp_err_t err = this->queue_slot_(&tx_slot, wire_data[i]);
-    if (err != ESP_OK)
-      return this->abort_exchange_(err, result);
+TransportError WiSafe2Component::transport_queue(TransportSlot slot, uint8_t tx_value,
+                                                 uint32_t timeout_ticks) {
+  SpiSlot *spi_slot = &this->exchange_slots_[static_cast<uint8_t>(slot)];
+  this->prepare_slot_(spi_slot, tx_value);
+  return transport_error_from_esp(spi_slave_queue_trans(SPI_HOST_USED, &spi_slot->transaction,
+                                                        static_cast<TickType_t>(timeout_ticks)));
+}
 
-    if (i + 1 == wire_length) {
-      err = this->queue_slot_(&rx_slots[0], 0x00);
-      if (err != ESP_OK)
-        return this->abort_exchange_(err, result);
-      first_rx_queued = true;
-    }
+TransportError WiSafe2Component::transport_wait(TransportSlot slot, uint32_t timeout_ticks,
+                                                TransportByte *result) {
+  if (result == nullptr)
+    return TransportError::INVALID_ARGUMENT;
+  SpiSlot *spi_slot = &this->exchange_slots_[static_cast<uint8_t>(slot)];
+  const esp_err_t error = this->wait_for_slot_(spi_slot, static_cast<TickType_t>(timeout_ticks));
+  if (error != ESP_OK)
+    return transport_error_from_esp(error);
+  result->value = this->slot_rx_byte_(spi_slot);
+  result->bits = spi_slot->transaction.trans_len;
+  return TransportError::OK;
+}
 
-    this->irq_set_(true);
-    err = this->wait_for_slot_(&tx_slot, pdMS_TO_TICKS(BYTE_TIMEOUT_MS));
-    this->irq_set_(false);
-    if (err != ESP_OK)
-      return this->abort_exchange_(err, result);
+void WiSafe2Component::transport_set_irq(bool asserted) { this->irq_set_(asserted); }
 
-    result->tx_bits[i] = tx_slot.transaction.trans_len;
-    result->simultaneous_rx[i] = this->slot_rx_byte_(&tx_slot);
-    result->tx_count = i + 1;
-  }
-  this->note_radio_frame_complete_();
+void WiSafe2Component::transport_acknowledge_received_byte() {
+  this->acknowledge_received_byte_();
+}
 
-  if (!first_rx_queued)
-    return ESP_FAIL;
+TransportError WiSafe2Component::transport_reset() {
+  return transport_error_from_esp(this->reset_spi_slave_());
+}
 
-  TickType_t start = xTaskGetTickCount();
-  TickType_t overall = pdMS_TO_TICKS(response_timeout_ms);
-  unsigned current = 0;
-  unsigned packets_received = 0;
-  bool escape_pending = false;
-  size_t escape_bits = 0;
-  while (result->response_len < PACKET_MAX) {
-    TickType_t elapsed = xTaskGetTickCount() - start;
-    if (elapsed >= overall)
-      return this->abort_exchange_(ESP_ERR_TIMEOUT, result);
-
-    esp_err_t err = this->wait_for_slot_(&rx_slots[current], overall - elapsed);
-    if (err != ESP_OK)
-      return this->abort_exchange_(err, result);
-
-    uint8_t value = this->slot_rx_byte_(&rx_slots[current]);
-    const bool terminator = !escape_pending && value == 0x7E;
-    const size_t bits = rx_slots[current].transaction.trans_len;
-    bool append = true;
-    if (escape_pending) {
-      if (value == 0x01)
-        value = 0x7E;
-      else if (value == 0x02)
-        value = 0x7D;
-      else
-        return this->abort_exchange_(ESP_ERR_INVALID_RESPONSE, result);
-      escape_pending = false;
-    } else if (value == 0x7D) {
-      escape_pending = true;
-      escape_bits = bits;
-      append = false;
-    }
-    if (append) {
-      size_t index = result->response_len++;
-      result->response[index] = value;
-      result->response_bits[index] = escape_bits > bits ? escape_bits : bits;
-      escape_bits = 0;
-    }
-    if (terminator && ++packets_received == response_packets) {
-      this->note_radio_frame_complete_();
-      this->acknowledge_received_byte_();
-      return ESP_OK;
-    }
-
-    unsigned next = current ^ 1U;
-    err = this->queue_slot_(&rx_slots[next], 0x00);
-    if (err != ESP_OK)
-      return this->abort_exchange_(err, result);
-    this->acknowledge_received_byte_();
-    current = next;
-  }
-  return this->abort_exchange_(ESP_ERR_NO_MEM, result);
+esp_err_t WiSafe2Component::exchange_packet_(const uint8_t *data, size_t length,
+                                             ExchangeResult *result, unsigned response_packets,
+                                             uint32_t response_timeout_ms) {
+  return esp_error_from_transport(
+      this->radio_transport_.exchange(data, length, result, response_packets, response_timeout_ms));
 }
 
 bool WiSafe2Component::response_contains_packet_(const ExchangeResult *result, const uint8_t *expected,
@@ -758,14 +723,14 @@ bool WiSafe2Component::discover_sid_(uint8_t sid, bool *awaiting_response) {
 }
 
 bool WiSafe2Component::has_remote_work_() const {
-  return this->remote_request_type_ != RemoteRequestType::NONE || this->pending_discovery_sid_map_ != 0 ||
+  return this->remote_request_.active() || this->pending_discovery_sid_map_ != 0 ||
          this->pending_status_sid_map_ != 0;
 }
 
 bool WiSafe2Component::remote_request_ready_() const {
-  if (this->remote_request_type_ == RemoteRequestType::NONE)
-    return this->pending_discovery_sid_map_ != 0 || this->pending_status_sid_map_ != 0;
-  return xTaskGetTickCount() - this->remote_request_started_tick_ >= pdMS_TO_TICKS(REMOTE_RESPONSE_TIMEOUT_MS);
+  const bool has_pending = this->pending_discovery_sid_map_ != 0 || this->pending_status_sid_map_ != 0;
+  return this->remote_request_.ready(this->transport_now_ticks(),
+                                     this->transport_ms_to_ticks(REMOTE_RESPONSE_TIMEOUT_MS), has_pending);
 }
 
 void WiSafe2Component::service_remote_requests_() {
@@ -775,14 +740,13 @@ void WiSafe2Component::service_remote_requests_() {
     this->pending_status_sid_map_ &= ~own_bit;
   }
 
-  if (this->remote_request_type_ != RemoteRequestType::NONE) {
+  if (this->remote_request_.active()) {
     if (!this->remote_request_ready_())
       return;
     ESP_LOGW(TAG, "Timed out waiting for asynchronous %s response from SID %u",
-             this->remote_request_type_ == RemoteRequestType::IDENTITY ? "identity" : "diagnostic",
-             this->remote_request_sid_);
-    this->remote_request_type_ = RemoteRequestType::NONE;
-    this->remote_request_sid_ = 0xFF;
+             this->remote_request_.type() == RemoteRequestType::IDENTITY ? "identity" : "diagnostic",
+             this->remote_request_.sid());
+    this->remote_request_.clear();
   }
 
   RemoteRequestType request_type = RemoteRequestType::NONE;
@@ -829,9 +793,7 @@ void WiSafe2Component::service_remote_requests_() {
     return;
   }
   if (awaiting_response) {
-    this->remote_request_type_ = request_type;
-    this->remote_request_sid_ = request_sid;
-    this->remote_request_started_tick_ = xTaskGetTickCount();
+    this->remote_request_.start(request_type, request_sid, this->transport_now_ticks());
   }
 }
 
@@ -854,10 +816,7 @@ bool WiSafe2Component::note_discovery_packet_(const uint8_t *packet, size_t leng
   DecodedPacket identity{};
   if (decode_packet(packet, length, &identity) && packet[0] == 0xC4 && identity.has_sid && identity.sid < 64) {
     const uint64_t bit = uint64_t{1} << identity.sid;
-    if (this->remote_request_type_ == RemoteRequestType::IDENTITY && this->remote_request_sid_ == identity.sid) {
-      this->remote_request_type_ = RemoteRequestType::NONE;
-      this->remote_request_sid_ = 0xFF;
-    }
+    (void) this->remote_request_.complete(RemoteRequestType::IDENTITY, identity.sid);
     this->known_sid_map_ |= bit;
     this->sid_device_ids_[identity.sid] = identity.device_id;
     this->pending_status_sid_map_ |= bit;
@@ -867,10 +826,7 @@ bool WiSafe2Component::note_discovery_packet_(const uint8_t *packet, size_t leng
   RemoteDiagnostic diagnostic{};
   if (decode_remote_diagnostic(packet, length, &diagnostic)) {
     const uint64_t bit = uint64_t{1} << diagnostic.sid;
-    if (this->remote_request_type_ == RemoteRequestType::STATUS && this->remote_request_sid_ == diagnostic.sid) {
-      this->remote_request_type_ = RemoteRequestType::NONE;
-      this->remote_request_sid_ = 0xFF;
-    }
+    (void) this->remote_request_.complete(RemoteRequestType::STATUS, diagnostic.sid);
     this->known_sid_map_ |= bit;
     this->sid_device_ids_[diagnostic.sid] = diagnostic.device_id;
     return this->remote_request_ready_();
@@ -950,8 +906,8 @@ void WiSafe2Component::execute_command_(ManagementCommand command) {
       remote_sid_map &= ~(uint64_t{1} << this->own_sid_);
     const uint64_t queryable = remote_sid_map & this->known_sid_map_;
     this->pending_status_sid_map_ |= queryable;
-    if (this->remote_request_type_ == RemoteRequestType::STATUS && this->remote_request_sid_ < 64)
-      this->pending_status_sid_map_ &= ~(uint64_t{1} << this->remote_request_sid_);
+    if (this->remote_request_.type() == RemoteRequestType::STATUS && this->remote_request_.sid() < 64)
+      this->pending_status_sid_map_ &= ~(uint64_t{1} << this->remote_request_.sid());
     unsigned queued = 0;
     for (uint8_t sid = 0; sid < 64; ++sid) {
       if ((queryable & (uint64_t{1} << sid)) != 0)

@@ -21,13 +21,15 @@
 #include "esphome/core/preferences.h"
 
 #include "protocol.h"
+#include "radio_transport.h"
 
 namespace esphome::wisafe2 {
 
 class WiSafe2CommandButton;
 
-class WiSafe2Component : public Component {
+class WiSafe2Component : public Component, protected RadioTransportIO {
  public:
+  WiSafe2Component();
   void set_pins(int sclk, int mosi, int miso, int cs, int irq);
   void set_initialized_sensor(binary_sensor::BinarySensor *sensor) { this->initialized_sensor_ = sensor; }
   void set_last_packet_sensor(text_sensor::TextSensor *sensor) { this->last_packet_sensor_ = sensor; }
@@ -53,10 +55,10 @@ class WiSafe2Component : public Component {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
  protected:
-  static constexpr size_t PACKET_MAX = 64;
+  static constexpr size_t PACKET_MAX = RADIO_PACKET_MAX;
   // Every logical payload byte can expand to a two-byte escape sequence. The
   // terminating 0x7E remains unescaped, so twice the logical limit is ample.
-  static constexpr size_t WIRE_PACKET_MAX = PACKET_MAX * 2;
+  static constexpr size_t WIRE_PACKET_MAX = RADIO_WIRE_PACKET_MAX;
   // Capacity is 16 bits because this radio has occasionally clocked 9-10 bits
   // for one byte. The protocol still expects 8; trans_len records what occurred.
   static constexpr size_t SPI_SLOT_BITS = 16;
@@ -83,22 +85,9 @@ class WiSafe2Component : public Component {
     spi_slave_transaction_t transaction;
   };
 
-  struct ExchangeResult {
-    bool spi_reset;
-    size_t tx_count;
-    size_t tx_expected;
-    size_t tx_bits[WIRE_PACKET_MAX];
-    uint8_t simultaneous_rx[WIRE_PACKET_MAX];
-    size_t response_len;
-    uint8_t response[PACKET_MAX];
-    size_t response_bits[PACKET_MAX];
-  };
-
-  ExchangeResult exchange_scratch_{};
-
   enum class EventType : uint8_t { INITIALIZED, ERROR, PACKET };
 
-  enum class RemoteRequestType : uint8_t { NONE, IDENTITY, STATUS };
+  using ExchangeResult = TransportExchangeResult;
 
   enum class CommandOutcome : uint8_t {
     ACCEPTED,
@@ -212,11 +201,19 @@ class WiSafe2Component : public Component {
   esp_err_t queue_slot_(SpiSlot *slot, uint8_t tx_value);
   esp_err_t wait_for_slot_(SpiSlot *expected, TickType_t timeout);
   esp_err_t reset_spi_slave_();
-  void wait_for_radio_command_gap_();
   void note_radio_frame_complete_();
-  esp_err_t abort_exchange_(esp_err_t cause, ExchangeResult *result);
   esp_err_t exchange_packet_(const uint8_t *data, size_t length, ExchangeResult *result,
                              unsigned response_packets, uint32_t response_timeout_ms);
+  uint32_t transport_now_ticks() const override;
+  uint32_t transport_ms_to_ticks(uint32_t milliseconds) const override;
+  void transport_delay_ticks(uint32_t ticks) override;
+  TransportError transport_queue(TransportSlot slot, uint8_t tx_value,
+                                 uint32_t timeout_ticks) override;
+  TransportError transport_wait(TransportSlot slot, uint32_t timeout_ticks,
+                                TransportByte *result) override;
+  void transport_set_irq(bool asserted) override;
+  void transport_acknowledge_received_byte() override;
+  TransportError transport_reset() override;
   bool response_contains_packet_(const ExchangeResult *result, const uint8_t *expected, size_t expected_len) const;
   bool response_pairing_state_(const ExchangeResult *result, bool *paired) const;
   void log_exchange_diagnostics_(const ExchangeResult *result) const;
@@ -252,6 +249,9 @@ class WiSafe2Component : public Component {
   gpio_num_t cs_pin_{GPIO_NUM_NC};
   gpio_num_t irq_pin_{GPIO_NUM_NC};
   gpio_glitch_filter_handle_t sclk_filter_{nullptr};
+  SpiSlot exchange_slots_[3]{};
+  RadioTransport radio_transport_;
+  ExchangeResult exchange_scratch_{};
   QueueHandle_t event_queue_{nullptr};
   QueueHandle_t command_queue_{nullptr};
   QueueHandle_t command_result_queue_{nullptr};
@@ -282,11 +282,7 @@ class WiSafe2Component : public Component {
   uint64_t pending_discovery_sid_map_{0};
   uint64_t pending_status_sid_map_{0};
   uint32_t sid_device_ids_[64]{};
-  RemoteRequestType remote_request_type_{RemoteRequestType::NONE};
-  uint8_t remote_request_sid_{0xFF};
-  TickType_t remote_request_started_tick_{0};
-  TickType_t last_radio_frame_tick_{0};
-  bool has_completed_radio_frame_{false};
+  AsyncRequestState remote_request_{};
   ESPPreferenceObject inventory_pref_{};
   ESPPreferenceObject test_history_pref_{};
   bool mqtt_was_connected_{false};
