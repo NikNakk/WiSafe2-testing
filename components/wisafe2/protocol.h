@@ -93,6 +93,8 @@ struct RadioDiagnostic {
 
 const char *detector_model_name(uint16_t model_id, bool has_model = true);
 DetectorType detector_type_for_model(uint16_t model_id, bool has_model = true);
+DetectorType infer_detector_type(uint16_t model_id, bool has_model, uint8_t device_type,
+                                 bool has_device_type, const char *event);
 bool escape_frame(const uint8_t *frame, size_t length, uint8_t *escaped, size_t capacity,
                   size_t *escaped_length);
 bool unescape_frame(const uint8_t *frame, size_t length, uint8_t *unescaped, size_t capacity,

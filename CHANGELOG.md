@@ -20,6 +20,10 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Live detector alarm and test trigger messages now use MQTT QoS 1 while
+  remaining non-retained.
+- WiSafe2 pin configuration now uses ESPHome's platform-aware input/output GPIO
+  validation in addition to requiring five distinct pins.
 - Raw sensor/radio battery readings, radio RSSI and radio fault count now use
   Home Assistant's `measurement` state class for graphs and long-term statistics.
 - MQTT sends now use ESPHome's asynchronous ESP-IDF path, and radio events are
@@ -28,6 +32,11 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Unknown detector models no longer advertise a misleading smoke alarm device
+  class without positive model, type or event evidence.
+- Command results use a dedicated non-blocking queue so packet bursts cannot
+  leave the radio command state permanently busy.
+- Main-loop detector updates no longer mutate the radio task's SID lookup.
 - Detector low-battery state now uses the manufacturer firmware's `08` and `20`
   battery-fault bits instead of the unrelated `02` and `40` bits.
 

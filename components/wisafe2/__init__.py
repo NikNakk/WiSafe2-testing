@@ -2,6 +2,7 @@ import re
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome import pins
 from esphome.components import binary_sensor, button, text_sensor, time
 from esphome.const import (
     CONF_ID,
@@ -47,9 +48,6 @@ WiSafe2Component = wisafe2_ns.class_("WiSafe2Component", cg.Component)
 WiSafe2CommandButton = wisafe2_ns.class_("WiSafe2CommandButton", button.Button)
 ManagementCommand = wisafe2_ns.enum("ManagementCommand", is_class=True)
 
-_GPIO = cv.int_range(min=0, max=48)
-
-
 def _device_id(value):
     value = cv.string_strict(value).strip().upper()
     if re.fullmatch(r"[0-9A-F]{6}", value) is None:
@@ -77,11 +75,11 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(WiSafe2Component),
             cv.GenerateID(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
-            cv.Required(CONF_SCLK_PIN): _GPIO,
-            cv.Required(CONF_MOSI_PIN): _GPIO,
-            cv.Required(CONF_MISO_PIN): _GPIO,
-            cv.Required(CONF_CS_PIN): _GPIO,
-            cv.Required(CONF_IRQ_PIN): _GPIO,
+            cv.Required(CONF_SCLK_PIN): pins.internal_gpio_input_pin_number,
+            cv.Required(CONF_MOSI_PIN): pins.internal_gpio_input_pin_number,
+            cv.Required(CONF_MISO_PIN): pins.internal_gpio_output_pin_number,
+            cv.Required(CONF_CS_PIN): pins.internal_gpio_input_pin_number,
+            cv.Required(CONF_IRQ_PIN): pins.internal_gpio_output_pin_number,
             cv.Optional(CONF_DISCOVERY_PREFIX, default="homeassistant"): cv.string_strict,
             cv.Optional(CONF_MAX_DETECTORS, default=16): cv.int_range(min=1, max=32),
             cv.Optional(CONF_BRIDGE_DEVICE_ID, default="A5B813"): _device_id,

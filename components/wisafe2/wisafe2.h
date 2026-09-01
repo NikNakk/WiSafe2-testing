@@ -96,7 +96,7 @@ class WiSafe2Component : public Component {
 
   ExchangeResult exchange_scratch_{};
 
-  enum class EventType : uint8_t { INITIALIZED, ERROR, PACKET, COMMAND_RESULT };
+  enum class EventType : uint8_t { INITIALIZED, ERROR, PACKET };
 
   enum class RemoteRequestType : uint8_t { NONE, IDENTITY, STATUS };
 
@@ -112,10 +112,13 @@ class WiSafe2Component : public Component {
 
   struct RadioEvent {
     EventType type;
-    ManagementCommand command;
-    CommandOutcome outcome;
     size_t length;
     uint8_t packet[PACKET_MAX];
+  };
+
+  struct CommandResult {
+    ManagementCommand command;
+    CommandOutcome outcome;
   };
 
   struct StoredDetector {
@@ -251,6 +254,7 @@ class WiSafe2Component : public Component {
   gpio_glitch_filter_handle_t sclk_filter_{nullptr};
   QueueHandle_t event_queue_{nullptr};
   QueueHandle_t command_queue_{nullptr};
+  QueueHandle_t command_result_queue_{nullptr};
   TaskHandle_t radio_task_handle_{nullptr};
   binary_sensor::BinarySensor *initialized_sensor_{nullptr};
   text_sensor::TextSensor *last_packet_sensor_{nullptr};
@@ -270,6 +274,8 @@ class WiSafe2Component : public Component {
   time::RealTimeClock *time_{nullptr};
   DetectorState detectors_[MAX_DETECTORS]{};
   uint8_t detector_count_{0};
+  // Seeded from persisted inventory before the radio task starts; after that,
+  // discovery scheduling and SID lookup are owned exclusively by that task.
   uint8_t own_sid_{0xFF};
   uint64_t known_sid_map_{0};
   uint64_t latest_sid_map_{0};
