@@ -34,7 +34,7 @@ jobs:
           cache-dependency-path: .github/requirements-ci.txt
 
       - name: Cache PlatformIO packages
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.platformio
           key: platformio-${{ runner.os }}-${{ hashFiles('wisafe2.yaml', 'components/**/*') }}
