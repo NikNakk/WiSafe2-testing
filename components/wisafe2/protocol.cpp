@@ -92,6 +92,14 @@ DetectorType detector_type_for_model(uint16_t model_id, bool has_model) {
   }
 }
 
+DetectorType infer_detector_type(uint16_t model_id, bool has_model, uint8_t device_type,
+                                 bool has_device_type, const char *event) {
+  if ((has_device_type && device_type == 0x41) ||
+      (event != nullptr && strstr(event, "CARBON MONOXIDE") != nullptr))
+    return DetectorType::CARBON_MONOXIDE;
+  return detector_type_for_model(model_id, has_model);
+}
+
 static uint8_t device_type_for_model(uint16_t model_id) {
   switch (detector_type_for_model(model_id)) {
     case DetectorType::SMOKE:

@@ -45,14 +45,19 @@ void WiSafe2Component::setup() {
   // configured detector before ESPHome's main loop gets a chance to drain it.
   this->event_queue_ = xQueueCreate(this->max_detectors_ * 2 + 8, sizeof(RadioEvent));
   this->command_queue_ = xQueueCreate(1, sizeof(ManagementCommand));
-  if (this->event_queue_ == nullptr || this->command_queue_ == nullptr) {
+  this->command_result_queue_ = xQueueCreate(1, sizeof(CommandResult));
+  if (this->event_queue_ == nullptr || this->command_queue_ == nullptr ||
+      this->command_result_queue_ == nullptr) {
     ESP_LOGE(TAG, "Could not allocate radio queues");
     if (this->event_queue_ != nullptr)
       vQueueDelete(this->event_queue_);
     if (this->command_queue_ != nullptr)
       vQueueDelete(this->command_queue_);
+    if (this->command_result_queue_ != nullptr)
+      vQueueDelete(this->command_result_queue_);
     this->event_queue_ = nullptr;
     this->command_queue_ = nullptr;
+    this->command_result_queue_ = nullptr;
     this->mark_failed();
     return;
   }
@@ -64,8 +69,10 @@ void WiSafe2Component::setup() {
     ESP_LOGE(TAG, "Could not create radio task");
     vQueueDelete(this->event_queue_);
     vQueueDelete(this->command_queue_);
+    vQueueDelete(this->command_result_queue_);
     this->event_queue_ = nullptr;
     this->command_queue_ = nullptr;
+    this->command_result_queue_ = nullptr;
     this->mark_failed();
   }
 }
@@ -97,8 +104,37 @@ void WiSafe2CommandButton::press_action() {
 }
 
 void WiSafe2Component::loop() {
-  if (this->event_queue_ == nullptr)
+  if (this->event_queue_ == nullptr || this->command_result_queue_ == nullptr)
     return;
+
+  CommandResult command_result{};
+  if (xQueueReceive(this->command_result_queue_, &command_result, 0) == pdTRUE) {
+    const char *result = "ERROR";
+    switch (command_result.outcome) {
+      case CommandOutcome::ACCEPTED: result = "ACCEPTED"; break;
+      case CommandOutcome::TIMEOUT: result = "TIMEOUT"; break;
+      case CommandOutcome::PAIRED: result = "PAIRED"; break;
+      case CommandOutcome::UNPAIRED: result = "UNPAIRED"; break;
+      case CommandOutcome::ALREADY_PAIRED: result = "ALREADY PAIRED"; break;
+      case CommandOutcome::NO_DETECTORS: result = "NO DETECTORS"; break;
+      case CommandOutcome::ERROR: result = "ERROR"; break;
+    }
+    const char *name = management_command_name(command_result.command);
+    ESP_LOGI(TAG, "%s: %s", name, result);
+    if (this->last_command_sensor_ != nullptr)
+      this->last_command_sensor_->publish_state(std::string(name) + ": " + result);
+    if (command_result.outcome == CommandOutcome::PAIRED ||
+        command_result.outcome == CommandOutcome::ALREADY_PAIRED) {
+      if (this->paired_sensor_ != nullptr)
+        this->paired_sensor_->publish_state(true);
+    } else if (command_result.outcome == CommandOutcome::UNPAIRED) {
+      if (this->paired_sensor_ != nullptr)
+        this->paired_sensor_->publish_state(false);
+    }
+    this->command_busy_ = false;
+    if (this->command_busy_sensor_ != nullptr)
+      this->command_busy_sensor_->publish_state(false);
+  }
 
   RadioEvent event{};
   uint8_t processed = 0;
@@ -115,31 +151,6 @@ void WiSafe2Component::loop() {
       if (this->initialized_sensor_ != nullptr)
         this->initialized_sensor_->publish_state(false);
       this->status_set_error();
-      this->command_busy_ = false;
-      if (this->command_busy_sensor_ != nullptr)
-        this->command_busy_sensor_->publish_state(false);
-    } else if (event.type == EventType::COMMAND_RESULT) {
-      const char *result = "ERROR";
-      switch (event.outcome) {
-        case CommandOutcome::ACCEPTED: result = "ACCEPTED"; break;
-        case CommandOutcome::TIMEOUT: result = "TIMEOUT"; break;
-        case CommandOutcome::PAIRED: result = "PAIRED"; break;
-        case CommandOutcome::UNPAIRED: result = "UNPAIRED"; break;
-        case CommandOutcome::ALREADY_PAIRED: result = "ALREADY PAIRED"; break;
-        case CommandOutcome::NO_DETECTORS: result = "NO DETECTORS"; break;
-        case CommandOutcome::ERROR: result = "ERROR"; break;
-      }
-      const char *name = management_command_name(event.command);
-      ESP_LOGI(TAG, "%s: %s", name, result);
-      if (this->last_command_sensor_ != nullptr)
-        this->last_command_sensor_->publish_state(std::string(name) + ": " + result);
-      if (event.outcome == CommandOutcome::PAIRED || event.outcome == CommandOutcome::ALREADY_PAIRED) {
-        if (this->paired_sensor_ != nullptr)
-          this->paired_sensor_->publish_state(true);
-      } else if (event.outcome == CommandOutcome::UNPAIRED) {
-        if (this->paired_sensor_ != nullptr)
-          this->paired_sensor_->publish_state(false);
-      }
       this->command_busy_ = false;
       if (this->command_busy_sensor_ != nullptr)
         this->command_busy_sensor_->publish_state(false);
@@ -1210,8 +1221,8 @@ void WiSafe2Component::log_packet_(const char *prefix, const uint8_t *data, size
 void WiSafe2Component::emit_event_(EventType type, const uint8_t *packet, size_t length) {
   if (this->event_queue_ == nullptr)
     return;
-  // Packet bursts may consume all but one slot. Reserve the final slot for a
-  // non-blocking command result so the main loop can always clear busy state.
+  // Packet bursts may consume all but one slot. Reserve the final slot for
+  // radio initialization/error state changes.
   if (type == EventType::PACKET && uxQueueSpacesAvailable(this->event_queue_) <= 1) {
     ESP_LOGW(TAG, "Radio event queue nearly full; dropping packet");
     return;
@@ -1226,14 +1237,14 @@ void WiSafe2Component::emit_event_(EventType type, const uint8_t *packet, size_t
 }
 
 void WiSafe2Component::emit_command_result_(ManagementCommand command, CommandOutcome outcome) {
-  if (this->event_queue_ == nullptr)
+  if (this->command_result_queue_ == nullptr)
     return;
-  RadioEvent event{};
-  event.type = EventType::COMMAND_RESULT;
-  event.command = command;
-  event.outcome = outcome;
-  if (xQueueSend(this->event_queue_, &event, 0) != pdTRUE)
-    ESP_LOGW(TAG, "Radio event queue full; dropping command result");
+  CommandResult result{command, outcome};
+  // There can only be one command in flight. A dedicated single-slot queue
+  // keeps packet bursts from consuming the completion path, while overwrite
+  // remains non-blocking for the timing-sensitive radio task.
+  if (xQueueOverwrite(this->command_result_queue_, &result) != pdPASS)
+    ESP_LOGE(TAG, "Could not record command result");
 }
 
 void WiSafe2Component::load_inventory_() {
@@ -1386,7 +1397,6 @@ void WiSafe2Component::update_detector_(const DecodedPacket &decoded, const char
   }
   if (decoded.has_sid && detector->sid != static_cast<int8_t>(decoded.sid)) {
     detector->sid = static_cast<int8_t>(decoded.sid);
-    this->sid_device_ids_[decoded.sid] = decoded.device_id;
     inventory_changed = true;
   }
   if (decoded.has_sid)
@@ -1549,15 +1559,16 @@ const char *WiSafe2Component::model_name_(const DetectorState &detector) const {
 }
 
 const char *WiSafe2Component::alarm_device_class_(const DetectorState &detector) const {
-  // Match MODEL_DEVICE_TYPES in fireangel-pro-connected-component. C304 is
-  // deliberately not inferred because donor-module type may not match role.
-  DetectorType type = detector_type_for_model(detector.model_id, detector.has_model);
-  if ((detector.has_device_type && detector.device_type == 0x41) ||
-      type == DetectorType::CARBON_MONOXIDE || strstr(detector.event, "CARBON MONOXIDE") != nullptr)
-    return "carbon_monoxide";
-  if (type == DetectorType::HEAT)
-    return "heat";
-  return "smoke";
+  // C304 and device type 0x81 are deliberately not inferred: a donor radio
+  // module or generic fire event does not distinguish smoke from heat.
+  switch (infer_detector_type(detector.model_id, detector.has_model, detector.device_type,
+                              detector.has_device_type, detector.event)) {
+    case DetectorType::SMOKE: return "smoke";
+    case DetectorType::HEAT: return "heat";
+    case DetectorType::CARBON_MONOXIDE: return "carbon_monoxide";
+    case DetectorType::UNKNOWN: return nullptr;
+  }
+  return nullptr;
 }
 
 bool WiSafe2Component::publish_discovery_entity_(const DetectorState &detector, const char *component,
@@ -1661,7 +1672,7 @@ bool WiSafe2Component::publish_detector_trigger_discovery_(const DetectorState &
 bool WiSafe2Component::publish_detector_event_(const DetectorState &detector, const char *payload) {
   char topic[128];
   this->format_detector_topic_(topic, sizeof(topic), detector, "event");
-  return mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, false);
+  return mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 1, false);
 }
 
 bool WiSafe2Component::format_last_test_(const DetectorState &detector, char *buffer, size_t length) const {

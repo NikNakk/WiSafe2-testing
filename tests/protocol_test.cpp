@@ -22,6 +22,7 @@ using esphome::wisafe2::encode_management_command;
 using esphome::wisafe2::encode_remote_diagnostic_request;
 using esphome::wisafe2::escape_frame;
 using esphome::wisafe2::is_identity_request;
+using esphome::wisafe2::infer_detector_type;
 using esphome::wisafe2::management_command_name;
 using esphome::wisafe2::unescape_frame;
 
@@ -405,6 +406,18 @@ void test_model_catalogue() {
   CHECK(detector_type_for_model(0xC304) == DetectorType::UNKNOWN);
   CHECK(detector_type_for_model(0xFFFF) == DetectorType::UNKNOWN);
   CHECK(detector_type_for_model(0x7803, false) == DetectorType::UNKNOWN);
+
+  CHECK(infer_detector_type(0xED08, true, 0x00, false, "UNKNOWN") == DetectorType::SMOKE);
+  CHECK(infer_detector_type(0x1104, true, 0x00, false, "UNKNOWN") == DetectorType::HEAT);
+  CHECK(infer_detector_type(0x7803, true, 0x00, false, "UNKNOWN") == DetectorType::CARBON_MONOXIDE);
+  CHECK(infer_detector_type(0xFFFF, true, 0x41, true, "UNKNOWN") == DetectorType::CARBON_MONOXIDE);
+  CHECK(infer_detector_type(0xED08, true, 0x41, true, "CARBON MONOXIDE EMERGENCY") ==
+        DetectorType::CARBON_MONOXIDE);
+  CHECK(infer_detector_type(0xFFFF, true, 0x81, true, "FIRE EMERGENCY") == DetectorType::UNKNOWN);
+  CHECK(infer_detector_type(0xFFFF, true, 0x00, false, "CARBON MONOXIDE EMERGENCY") ==
+        DetectorType::CARBON_MONOXIDE);
+  CHECK(infer_detector_type(0xFFFF, true, 0x00, false, "UNKNOWN") == DetectorType::UNKNOWN);
+  CHECK(infer_detector_type(0xC304, true, 0x81, true, nullptr) == DetectorType::UNKNOWN);
 }
 
 void test_extended_frames() {
