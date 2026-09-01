@@ -8,6 +8,9 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Host-side radio transport tests covering command pacing, SPI queue/IRQ order,
+  response deadlines, asynchronous replies, reset failures and post-reset
+  recovery without requiring ESP32 hardware.
 - Complete per-detector `71` status diagnostics for calibrated, generic fault,
   on-base, detector-battery fault, AC failure and radio-module-battery fault,
   together with the raw status byte for the two still-unnamed high bits.
@@ -20,6 +23,9 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The timing-sensitive SPI exchange orchestration and asynchronous-response
+  tracking now use platform-neutral state machines behind the existing ESP-IDF
+  adapter, preserving the radio task's byte-level behaviour.
 - Live detector alarm and test trigger messages now use MQTT QoS 1 while
   remaining non-retained.
 - WiSafe2 pin configuration now uses ESPHome's platform-aware input/output GPIO

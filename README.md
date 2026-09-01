@@ -359,7 +359,10 @@ where timing is involved, logic-analyser traces from real hardware.
 The radio packet decoder is platform-independent and has host-side coverage for
 the observed detector status frames, tests, emergencies, silence, attached-radio
 diagnostics, identity responses, battery/base flags, extended frames and
-malformed input, including reserved-byte escaping. `D2` is treated as a
+malformed input, including reserved-byte escaping. It also exercises the radio
+transport state machine with a fake clock and SPI adapter, covering command
+pacing, queue/acknowledgement order, timeouts, asynchronous responses and reset
+recovery. `D2` is treated as a
 diagnostic response from the attached radio rather than a missing-detector
 event. Known packet types use minimum
 lengths because observed variants carry trailing fields that are not yet
@@ -375,9 +378,10 @@ compiles the complete firmware for every push and pull request. CI copies the
 tracked placeholder values from `secrets.yaml.example`; real credentials remain
 in the ignored `secrets.yaml` file and are never required by the workflow.
 
-The host suite validates packet encoding and decoding only. SPI-slave timing,
-IRQ acknowledgement and the radio's occasional extra clocks require bench
-testing with the donor radio and are not simulated by CI.
+The host suite validates the transport's ordering and timeout decisions, but it
+does not emulate ESP-IDF's SPI-slave driver or electrical timing. The 8 µs IRQ
+pulse and the radio's occasional extra clocks still require bench testing with
+the donor radio.
 
 ## Versioning
 
